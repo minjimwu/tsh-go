@@ -52,6 +52,21 @@ env GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o ./build/tshd_
 env GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o ./build/tsh_linux_amd64 cmd/tsh.go
 ```
 
+#### Build for windows
+
+```
+$ make windows
+env GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o ./build/tshd_windows_amd64.exe cmd/tshd.go
+env GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o ./build/tsh_windows_amd64.exe cmd/tsh.go
+```
+
+#### Build for windows (DLL)
+
+```
+$ make windows_dll
+env CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc go build -buildmode=c-shared -ldflags "-s -w -H=windowsgui" -o ./build/tshd.dll cmd/tshd_dll.go
+```
+
 ### How to use the tshd (server)
 
 #### Help
@@ -81,6 +96,12 @@ $ ./build/tshd_linux_amd64
 
 ```
 $ ./build/tshd_linux_amd64 -c <client hostname>
+```
+
+#### Run via rundll32 (Windows DLL)
+
+```
+rundll32.exe tshd.dll,Run -c <client hostname> -p 2345 -s mysecret -d 10
 ```
 
 ### How to use the tsh (client)

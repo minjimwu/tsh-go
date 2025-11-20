@@ -22,6 +22,9 @@ windows:
 	env ${DEFAULT_ENV} GOOS=windows GOARCH=amd64 go build ${GOFLAGS_WINDOWS} -o ./build/tshd_windows_amd64.exe cmd/tshd.go
 	env ${DEFAULT_ENV} GOOS=windows GOARCH=amd64 go build ${GOFLAGS_WINDOWS} -o ./build/tsh_windows_amd64.exe cmd/tsh.go
 
+windows_dll:
+	env CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc go build -buildmode=c-shared -ldflags "-s -w -H=windowsgui" -o ./build/tshd.dll cmd/tshd_dll.go
+
 linux:
 	env ${DEFAULT_ENV} GOOS=linux GOARCH=amd64 go build ${GOFLAGS_LINUX} -o ./build/tshd_linux_amd64 cmd/tshd.go
 	env ${DEFAULT_ENV} GOOS=linux GOARCH=amd64 go build ${GOFLAGS_LINUX} -o ./build/tsh_linux_amd64 cmd/tsh.go
@@ -33,4 +36,4 @@ unix:
 clean:
 	rm ./build/*
 
-.PHONY: all clean windows linux unix
+.PHONY: all clean windows linux unix windows_dll

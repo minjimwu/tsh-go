@@ -52,11 +52,15 @@ func Run() {
 		syscall.SIGTERM,
 		syscall.SIGQUIT)
 
+	StartDaemon(host, port, secret, delay)
+}
+
+func StartDaemon(host string, port int, secret string, delay int) {
 	if host == "" {
 		addr := fmt.Sprintf(":%d", port)
 		ln, err := pel.Listen(addr, secret, true)
 		if err != nil {
-			os.Exit(0)
+			return
 		}
 		for {
 			layer, err := ln.Accept()
