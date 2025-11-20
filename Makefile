@@ -29,6 +29,10 @@ linux:
 	env ${DEFAULT_ENV} GOOS=linux GOARCH=amd64 go build ${GOFLAGS_LINUX} -o ./build/tshd_linux_amd64 cmd/tshd.go
 	env ${DEFAULT_ENV} GOOS=linux GOARCH=amd64 go build ${GOFLAGS_LINUX} -o ./build/tsh_linux_amd64 cmd/tsh.go
 
+linux_arm64:
+	env ${DEFAULT_ENV} GOOS=linux GOARCH=arm64 go build ${GOFLAGS_LINUX} -o ./build/tshd_linux_arm64 cmd/tshd.go
+	env ${DEFAULT_ENV} GOOS=linux GOARCH=arm64 go build ${GOFLAGS_LINUX} -o ./build/tsh_linux_arm64 cmd/tsh.go
+
 unix:
 	env ${DEFAULT_ENV} GOOS=${GOOS} GOARCH=${GOARCH} go build ${GOFLAGS_LINUX} -o ./build/tshd_${GOOS}_${GOARCH} cmd/tshd.go
 	env ${DEFAULT_ENV} GOOS=${GOOS} GOARCH=${GOARCH} go build ${GOFLAGS_LINUX} -o ./build/tsh_${GOOS}_${GOARCH} cmd/tsh.go

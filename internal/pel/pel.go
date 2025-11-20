@@ -214,6 +214,10 @@ func (layer *PktEncLayer) Close() {
 	layer.conn.Close()
 }
 
+func (layer *PktEncLayer) Addr() net.Addr {
+	return layer.conn.RemoteAddr()
+}
+
 func (layer *PktEncLayer) Write(p []byte) (int, error) {
 	total := 0
 	for total < len(p) {

@@ -211,10 +211,24 @@ $ ./build/tsh_linux_amd64 <server hostname> get /etc/passwd .
 $ ./build/tsh_linux_amd64 <server hostname> put myfile /tmp
 ```
 
-#### Connect back mode
+#### Connect back mode (Multi-Session)
+
+In Connect Back mode (`cb`), the client now acts as a Multi-Session Manager. It listens for incoming connections and allows you to manage multiple sessions interactively.
 
 ```
 $ ./build/tsh_linux_amd64 cb
-$ ./build/tsh_linux_amd64 cb get /etc/passwd .
-$ ./build/tsh_linux_amd64 cb put myfile /tmp
+[*] Listening on :1234 for incoming connections...
+[*] Type 'help' for commands.
+tsh>
+[+] New session 1 opened.
+tsh> list
+ID   | Connected At         | Status
+--------------------------------------------------
+1    | 15:04:05             | Active
+
+tsh> interact 1
+[*] Interacting with session 1...
+<shell interaction>
 ```
+
+To exit a session, type `exit` (this will close the session).

