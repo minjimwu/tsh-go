@@ -6,6 +6,7 @@ const (
 	GetFile  = 1
 	PutFile  = 2
 	RunShell = 3
+	Terminate = 4
 
 	PelSuccess = 1
 	PelFailure = 0

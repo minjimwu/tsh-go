@@ -232,3 +232,30 @@ tsh> interact 1
 ```
 
 To exit a session, type `exit` (this will close the session).
+
+**Note:** Due to the protocol design, `tshd` (the daemon) closes the connection after each command (shell exit, file upload, or download). It will then automatically reconnect, creating a **new session with a new ID**. You will need to list sessions again to find the new ID.
+
+#### Transfer files (Interactive)
+
+```
+tsh> download <id> <remote_path> <local_path>
+tsh> upload <id> <local_path> <remote_path>
+```
+
+Example:
+```
+tsh> list
+ID   | IP              | User       | Hostname        | OS
+--------------------------------------------------------------------------------
+1    | 127.0.0.1       | root       | my-server       | linux/amd64
+
+tsh> download 1 /etc/passwd ./passwd
+[*] Interacting with session 1...
+Downloading 100% |████████████████████| ( 2.3 kB/ 2.3 kB, 10 MB/s)
+Done.
+
+[*] Session finished.
+
+[+] New session 2 opened.
+tsh> upload 2 ./exploit.sh /tmp/exploit.sh
+```

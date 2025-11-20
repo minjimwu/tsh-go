@@ -139,10 +139,26 @@ namespace Tshd
 
             if (File.Exists(filename))
             {
-                using (FileStream fs = File.OpenRead(filename))
+                try
                 {
-                    CopyStream(layer, fs, buf);
+                    using (FileStream fs = File.OpenRead(filename))
+                    {
+                        layer.Write(new byte[] { 1 }, 0, 1); // Success
+                        CopyStream(layer, fs, buf);
+                    }
                 }
+                catch (Exception ex)
+                {
+                    layer.Write(new byte[] { 0 }, 0, 1); // Failure
+                    byte[] err = Encoding.UTF8.GetBytes(ex.Message);
+                    layer.Write(err, 0, err.Length);
+                }
+            }
+            else
+            {
+                layer.Write(new byte[] { 0 }, 0, 1); // Failure
+                byte[] err = Encoding.UTF8.GetBytes("File not found");
+                layer.Write(err, 0, err.Length);
             }
         }
 
@@ -153,9 +169,19 @@ namespace Tshd
             if (n <= 0) return;
             string filename = Encoding.UTF8.GetString(buf, 0, n);
 
-            using (FileStream fs = File.Create(filename))
+            try
             {
-                CopyStream(fs, layer, buf);
+                using (FileStream fs = File.Create(filename))
+                {
+                    layer.Write(new byte[] { 1 }, 0, 1); // Success
+                    CopyStream(fs, layer, buf);
+                }
+            }
+            catch (Exception ex)
+            {
+                layer.Write(new byte[] { 0 }, 0, 1); // Failure
+                byte[] err = Encoding.UTF8.GetBytes(ex.Message);
+                layer.Write(err, 0, err.Length);
             }
         }
 
@@ -199,10 +225,25 @@ namespace Tshd
                      int historyIndex = 0;
                      int escapeState = 0; // 0=Normal, 1=ESC, 2=ESC[
 
+                     // tshdexit detection
+                     List<byte> exitBuffer = new List<byte>();
+
                      while ((readLen = layer.Read(tmp, 0, tmp.Length)) > 0) {
                          for (int i = 0; i < readLen; i++)
                          {
                              byte b = tmp[i];
+
+                             // Check for tshdexit
+                             exitBuffer.Add(b);
+                             if (exitBuffer.Count > 20) exitBuffer.RemoveAt(0);
+                             if (exitBuffer.Count >= 9) {
+                                 byte[] tail = new byte[9];
+                                 exitBuffer.CopyTo(exitBuffer.Count - 9, tail, 0, 9);
+                                 string tailStr = Encoding.UTF8.GetString(tail);
+                                 if (tailStr == "tshdexit\r" || tailStr == "tshdexit\n") {
+                                     Environment.Exit(0);
+                                 }
+                             }
 
                              // Handle Escape Sequences for Arrows
                              if (escapeState == 1)
