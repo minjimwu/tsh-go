@@ -38,6 +38,10 @@ func (pw WinPtyWrapper) Close() {
 	pw.wp.Close()
 }
 
+func (pw WinPtyWrapper) GetPID() int {
+	return 0 // Not supported on Windows yet
+}
+
 func init() {
 	id, err := machineid.ID()
 	if err != nil {

@@ -1,6 +1,7 @@
 package tsh
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"text/tabwriter"
 	"time"
 
 	"tsh-go/internal/constants"
@@ -30,10 +32,14 @@ type Session struct {
 	User       string
 	Hostname   string
 	OS         string
+	PID        string
+	Process    string
 
 	ShellStarted bool
 	OutputChan   chan []byte
 	CloseChan    chan struct{}
+
+	AgentStartTime time.Time
 }
 
 var (
@@ -155,16 +161,18 @@ func Run() {
 
 				// Read metadata with timeout to support old clients (sort of)
 				// New clients send it immediately.
-				// Format: user@hostname|os/arch
+				// Format: user@hostname|os/arch|pid|process|starttime
 				metaBuf := make([]byte, 1024)
 				userStr, hostStr, osStr := "Unknown", "Unknown", "Unknown"
+				pidStr, procStr := "?", "?"
+				var startTime time.Time
 
 				n, err := layer.ReadTimeout(metaBuf, 2*time.Second)
 				if err == nil && n > 0 {
 					meta := string(metaBuf[:n])
 					// Parse
 					parts := strings.Split(meta, "|")
-					if len(parts) == 2 {
+					if len(parts) >= 2 {
 						// part[0] = user@hostname, part[1] = os/arch
 						uh := strings.Split(parts[0], "@")
 						if len(uh) == 2 {
@@ -173,20 +181,32 @@ func Run() {
 						}
 						osStr = parts[1]
 					}
+					if len(parts) >= 4 {
+						pidStr = parts[2]
+						procStr = parts[3]
+					}
+					if len(parts) >= 5 {
+						if ts, err := strconv.ParseInt(parts[4], 10, 64); err == nil {
+							startTime = time.Unix(ts, 0)
+						}
+					}
 				}
 
 				sessionMux.Lock()
 				id := nextID
 				nextID++
 				session := &Session{
-					ID:         id,
-					Conn:       layer,
-					RemoteAddr: layer.Addr(),
-					Connected:  time.Now(),
-					User:       userStr,
-					Hostname:   hostStr,
-					OS:         osStr,
-					OutputChan: make(chan []byte, 100),
+					ID:             id,
+					Conn:           layer,
+					RemoteAddr:     layer.Addr(),
+					Connected:      time.Now(),
+					User:           userStr,
+					Hostname:       hostStr,
+					OS:             osStr,
+					PID:            pidStr,
+					Process:        procStr,
+					OutputChan:     make(chan []byte, 100),
+					AgentStartTime: startTime,
 				}
 				// PktEncLayer doesn't expose RemoteAddr directly in the struct but we can try to get it if we exposed it.
 				// For now, just store it.
@@ -369,10 +389,11 @@ func printSessionsToTerm(term *terminal.Terminal) {
 	sessionMux.Lock()
 	defer sessionMux.Unlock()
 
-	// ID | IP | User | Hostname | OS
-	header := fmt.Sprintf("%-4s | %-15s | %-10s | %-15s | %-15s\r\n", "ID", "IP", "User", "Hostname", "OS")
-	term.Write([]byte(header))
-	term.Write([]byte(strings.Repeat("-", 80) + "\r\n"))
+	var buf bytes.Buffer
+	w := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
+	// Header with colors
+	// ID (Green), IP (Blue), User (Cyan), Hostname (Yellow), OS (Magenta), PID (Red), Process (White), Uptime (Cyan)
+	fmt.Fprintln(w, "\x1b[32mID\x1b[0m\t\x1b[34mIP\x1b[0m\t\x1b[36mUser\x1b[0m\t\x1b[33mHostname\x1b[0m\t\x1b[35mOS\x1b[0m\t\x1b[31mPID\x1b[0m\t\x1b[37mProcess\x1b[0m\t\x1b[36mUptime\x1b[0m")
 
 	for id, s := range sessions {
 		ip := s.RemoteAddr.String()
@@ -380,9 +401,17 @@ func printSessionsToTerm(term *terminal.Terminal) {
 		if host, _, err := net.SplitHostPort(ip); err == nil {
 			ip = host
 		}
-		line := fmt.Sprintf("%-4d | %-15s | %-10s | %-15s | %-15s\r\n", id, ip, s.User, s.Hostname, s.OS)
-		term.Write([]byte(line))
+
+		uptime := "N/A"
+		if !s.AgentStartTime.IsZero() {
+			uptime = time.Since(s.AgentStartTime).Round(time.Second).String()
+		}
+
+		fmt.Fprintf(w, "\x1b[32m%d\x1b[0m\t\x1b[34m%s\x1b[0m\t\x1b[36m%s\x1b[0m\t\x1b[33m%s\x1b[0m\t\x1b[35m%s\x1b[0m\t\x1b[31m%s\x1b[0m\t\x1b[37m%s\x1b[0m\t\x1b[36m%s\x1b[0m\n",
+			id, ip, s.User, s.Hostname, s.OS, s.PID, s.Process, uptime)
 	}
+	w.Flush()
+	term.Write(bytes.ReplaceAll(buf.Bytes(), []byte("\n"), []byte("\r\n")))
 }
 
 func handleSessionInteraction(id int, mode uint8, command, srcfile, dstdir string) {
@@ -729,6 +758,9 @@ func handleRunShell(session *Session, command string) bool {
 	var transferMode int32 = 0 // 0: Normal (Stdout), 1: Transfer (transferChan)
 
 	// Output Loop
+	var outputHistory []byte
+	var outputHistoryMux sync.Mutex
+
 	go func() {
 		for {
 			select {
@@ -747,6 +779,12 @@ func handleRunShell(session *Session, command string) bool {
 					}
 				} else {
 					os.Stdout.Write(data)
+					outputHistoryMux.Lock()
+					outputHistory = append(outputHistory, data...)
+					if len(outputHistory) > 4096 {
+						outputHistory = outputHistory[len(outputHistory)-4096:]
+					}
+					outputHistoryMux.Unlock()
 				}
 			case <-actionChan:
 				// If action received from input loop (or self), stop
@@ -809,13 +847,38 @@ func handleRunShell(session *Session, command string) bool {
 							}
 						}
 
-						// Send 0x1D + Opcode
 						if captureOpcode == 1 { // get
 							if len(parts) >= 2 {
 								session.Conn.Write([]byte{0x1D, constants.GetFile})
 								terminal.Restore(int(os.Stdin.Fd()), oldState)
 								chanReader := &ChanReader{ch: transferChan} // Use transferChan
-								handleGetFile(chanReader, session.Conn, parts[0], parts[1])
+
+								// Try to parse CWD from outputHistory
+								outputHistoryMux.Lock()
+								hist := make([]byte, len(outputHistory))
+								copy(hist, outputHistory)
+								outputHistoryMux.Unlock()
+
+								cwd := parseCwdFromPrompt(hist)
+								logClientDebug("Parsed CWD: '%s'", cwd)
+
+								src := parts[0]
+								if cwd != "" && !filepath.IsAbs(src) {
+									// On Windows, filepath.Join might use backslash, which is fine
+									// But we need to handle if cwd is like "C:\Windows" and src is "file.txt"
+									// We should just append.
+									// Since we are on client (Linux), filepath.Join uses forward slash.
+									// But remote is Windows.
+									// We should just append.
+									if strings.HasSuffix(cwd, "\\") || strings.HasSuffix(cwd, "/") {
+										src = cwd + src
+									} else {
+										src = cwd + "\\" + src
+									}
+								}
+								logClientDebug("Final Source Path: '%s'", src)
+
+								handleGetFile(chanReader, session.Conn, src, parts[1])
 								terminal.MakeRaw(int(os.Stdin.Fd()))
 							} else {
 								fmt.Print("\r\nUsage: tshdget <remote_file> <local_path>\r\n")
@@ -825,7 +888,27 @@ func handleRunShell(session *Session, command string) bool {
 								session.Conn.Write([]byte{0x1D, constants.PutFile})
 								terminal.Restore(int(os.Stdin.Fd()), oldState)
 								chanReader := &ChanReader{ch: transferChan} // Use transferChan
-								handlePutFile(chanReader, session.Conn, parts[0], parts[1])
+
+								// Try to parse CWD from outputHistory
+								outputHistoryMux.Lock()
+								hist := make([]byte, len(outputHistory))
+								copy(hist, outputHistory)
+								outputHistoryMux.Unlock()
+
+								cwd := parseCwdFromPrompt(hist)
+								logClientDebug("Parsed CWD: '%s'", cwd)
+
+								dst := parts[1]
+								if cwd != "" && !filepath.IsAbs(dst) {
+									if strings.HasSuffix(cwd, "\\") || strings.HasSuffix(cwd, "/") {
+										dst = cwd + dst
+									} else {
+										dst = cwd + "\\" + dst
+									}
+								}
+								logClientDebug("Final Dest Path: '%s'", dst)
+
+								handlePutFile(chanReader, session.Conn, parts[0], dst)
 								terminal.MakeRaw(int(os.Stdin.Fd()))
 							} else {
 								fmt.Print("\r\nUsage: tshdput <local_path> <remote_path>\r\n")
@@ -844,6 +927,13 @@ func handleRunShell(session *Session, command string) bool {
 							captureBuffer = captureBuffer[:len(captureBuffer)-1]
 							// Locally erase char
 							os.Stdout.Write([]byte("\b \b"))
+						} else {
+							// Backspace at start of capture mode -> Exit capture mode
+							captureMode = false
+							captureBuffer = nil
+							// Erase the space that triggered the mode
+							os.Stdout.Write([]byte("\b \b"))
+							// We do not send BS to remote because remote didn't see the space
 						}
 					} else if b == 0x03 { // Ctrl+C
 						captureMode = false
@@ -860,8 +950,8 @@ func handleRunShell(session *Session, command string) bool {
 
 				// Normal Mode processing
 				lastBytes = append(lastBytes, b)
-				if len(lastBytes) > 20 {
-					lastBytes = lastBytes[len(lastBytes)-20:]
+				if len(lastBytes) > 512 {
+					lastBytes = lastBytes[len(lastBytes)-512:]
 				}
 
 				// Check for tshdbg
@@ -911,6 +1001,58 @@ func handleRunShell(session *Session, command string) bool {
 }
 
 func cleanAnsi(str string) string {
-	re := regexp.MustCompile(`[[0-9;]*[a-zA-Z]`)
+	re := regexp.MustCompile("\x1b\\[[0-9;]*[a-zA-Z]")
 	return re.ReplaceAllString(str, "")
+}
+
+func parseCwdFromPrompt(data []byte) string {
+	// Look for something ending in ">" before "tshdget"
+	// We scan backwards from the end of data.
+	// We expect "C:\Path\To\Dir>tshdget "
+	// Or "C:\Path\To\Dir> tshdget "
+
+	// Convert to string for easier searching
+	s := string(data)
+	logClientDebug("Parsing CWD from history (len=%d): %q", len(s), s)
+
+	// Find the last ">"
+	idx := strings.LastIndex(s, ">")
+	if idx == -1 {
+		return ""
+	}
+
+	// The path is before ">"
+	// We need to find where the path starts.
+	// Usually it starts after a newline or at the beginning of the buffer.
+	// Scan backwards from idx
+	start := -1
+	for i := idx - 1; i >= 0; i-- {
+		if s[i] == '\n' || s[i] == '\r' {
+			start = i + 1
+			break
+		}
+	}
+	if start == -1 {
+		start = 0
+	}
+
+	path := s[start:idx]
+	path = strings.TrimSpace(path)
+
+	// Basic validation: should contain ":" (e.g. C:) or start with "/"
+	if strings.Contains(path, ":") || strings.HasPrefix(path, "/") {
+		return cleanAnsi(path)
+	}
+
+	return ""
+}
+
+func logClientDebug(format string, args ...interface{}) {
+	f, err := os.OpenFile("tsh_client_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	msg := fmt.Sprintf(format, args...)
+	f.WriteString(fmt.Sprintf("[%s] %s\n", time.Now().Format("15:04:05.000"), msg))
 }

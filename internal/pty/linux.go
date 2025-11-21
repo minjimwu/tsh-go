@@ -13,6 +13,7 @@ import (
 
 type LinuxPtyWrapper struct {
 	ptmx *os.File
+	cmd  *exec.Cmd
 }
 
 func (pw LinuxPtyWrapper) StdIn() io.Writer {
@@ -27,6 +28,13 @@ func (pw LinuxPtyWrapper) Close() {
 	pw.ptmx.Close()
 }
 
+func (pw LinuxPtyWrapper) GetPID() int {
+	if pw.cmd != nil && pw.cmd.Process != nil {
+		return pw.cmd.Process.Pid
+	}
+	return 0
+}
+
 func OpenPty(command, term string, ws_col, ws_row uint32) (PtyWrapper, error) {
 	c := exec.Command("/bin/sh", "-c", command)
 	c.Env = os.Environ()
@@ -39,6 +47,5 @@ func OpenPty(command, term string, ws_col, ws_row uint32) (PtyWrapper, error) {
 	if err != nil {
 		return nil, err
 	}
-	return LinuxPtyWrapper{ptmx: ptmx}, nil
+	return LinuxPtyWrapper{ptmx: ptmx, cmd: c}, nil
 }
-

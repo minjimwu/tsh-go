@@ -6,4 +6,5 @@ type PtyWrapper interface {
 	StdIn() io.Writer
 	StdOut() io.Reader
 	Close()
+	GetPID() int
 }
