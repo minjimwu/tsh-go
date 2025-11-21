@@ -623,7 +623,13 @@ func handleGetFile(reader *ChanReader, writer io.Writer, srcfile, dstPath string
 		progressbar.OptionShowBytes(true),
 		progressbar.OptionShowCount(),
 		progressbar.OptionSetDescription("Downloading"),
-		progressbar.OptionSpinnerType(22),
+		progressbar.OptionSetTheme(progressbar.Theme{
+			Saucer:        "=",
+			SaucerHead:    ">",
+			SaucerPadding: "-",
+			BarStart:      "[",
+			BarEnd:        "]",
+		}),
 	)
 	io.CopyBuffer(io.MultiWriter(f, bar), io.LimitReader(reader, size), buffer)
 	fmt.Print("\nDone.\n")
@@ -701,7 +707,13 @@ func handlePutFile(reader *ChanReader, writer io.Writer, srcfile, dstPath string
 		progressbar.OptionShowBytes(true),
 		progressbar.OptionShowCount(),
 		progressbar.OptionSetDescription("Uploading"),
-		progressbar.OptionSpinnerType(22),
+		progressbar.OptionSetTheme(progressbar.Theme{
+			Saucer:        "=",
+			SaucerHead:    ">",
+			SaucerPadding: "-",
+			BarStart:      "[",
+			BarEnd:        "]",
+		}),
 	)
 	utils.CopyBuffer(io.MultiWriter(writer, bar), f, buffer)
 	fmt.Print("\nDone.\n")

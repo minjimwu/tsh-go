@@ -27,9 +27,7 @@ For example, I successfully compiled to the following platforms:
 
 ## TODO / Known Issues
 
-1. **PowerShell and MSBuild file transfer limitation**: When using `tshdget` and `tshdput` commands inside a PowerShell or MSBuild-loaded shell session, file transfers over 1MB may fail or have connection issues.
-
-2. **Download/Upload command conflict**: The `download <id>` and `upload <id>` commands from the tsh manager menu cannot be used when a session is already running an interactive shell. You will receive a "Session is busy running a shell" error. Use the in-shell commands `tshdget` and `tshdput` instead when inside an active shell session.
+1. **Download/Upload command conflict**: The `download <id>` and `upload <id>` commands from the tsh manager menu cannot be used when a session is already running an interactive shell. You will receive a "Session is busy running a shell" error. Use the in-shell commands `tshdget` and `tshdput` instead when inside an active shell session.
 
 ## Usage
 

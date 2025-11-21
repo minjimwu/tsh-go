@@ -249,9 +249,9 @@ func (layer *PktEncLayer) write(p []byte) (int, error) {
 
 	layer.sendEncrypter.CryptBlocks(buffer[:blkLength], buffer[:blkLength])
 
-	buffer[blkLength] = byte(layer.sendPktCtr << 24 & 0xFF)
-	buffer[blkLength+1] = byte(layer.sendPktCtr << 16 & 0xFF)
-	buffer[blkLength+2] = byte(layer.sendPktCtr << 8 & 0xFF)
+	buffer[blkLength] = byte((layer.sendPktCtr >> 24) & 0xFF)
+	buffer[blkLength+1] = byte((layer.sendPktCtr >> 16) & 0xFF)
+	buffer[blkLength+2] = byte((layer.sendPktCtr >> 8) & 0xFF)
 	buffer[blkLength+3] = byte(layer.sendPktCtr & 0xFF)
 
 	layer.sendHmac.Reset()
@@ -306,9 +306,9 @@ func (layer *PktEncLayer) read(p []byte) (int, error) {
 	}
 
 	hmac := append([]byte{}, buffer[blkLength:blkLength+20]...)
-	buffer[blkLength] = byte(layer.recvPktCtr << 24 & 0xFF)
-	buffer[blkLength+1] = byte(layer.recvPktCtr << 16 & 0xFF)
-	buffer[blkLength+2] = byte(layer.recvPktCtr << 8 & 0xFF)
+	buffer[blkLength] = byte((layer.recvPktCtr >> 24) & 0xFF)
+	buffer[blkLength+1] = byte((layer.recvPktCtr >> 16) & 0xFF)
+	buffer[blkLength+2] = byte((layer.recvPktCtr >> 8) & 0xFF)
 	buffer[blkLength+3] = byte(layer.recvPktCtr & 0xFF)
 
 	layer.recvHmac.Reset()
