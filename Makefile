@@ -25,6 +25,9 @@ windows:
 windows_dll:
 	env CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc go build -buildmode=c-shared -ldflags "-s -w -H=windowsgui" -o ./build/tshd.dll cmd/tshd_dll.go
 
+windows_net:
+	mcs -out:build/tshdnet.exe cmd/tshd.cs
+
 linux:
 	env ${DEFAULT_ENV} GOOS=linux GOARCH=amd64 go build ${GOFLAGS_LINUX} -o ./build/tshd_linux_amd64 cmd/tshd.go
 	env ${DEFAULT_ENV} GOOS=linux GOARCH=amd64 go build ${GOFLAGS_LINUX} -o ./build/tsh_linux_amd64 cmd/tsh.go

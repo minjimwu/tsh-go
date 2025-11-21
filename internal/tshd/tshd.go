@@ -324,6 +324,9 @@ func handleRunShell(layer *pel.PktEncLayer) {
 					case constants.PutFile:
 						LogDebug("handleRunShell: Switching to handlePutFile")
 						handlePutFile(layer, extra)
+					case constants.Terminate:
+						LogDebug("handleRunShell: Received Terminate")
+						os.Exit(0)
 					}
 					continue
 				}

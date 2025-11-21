@@ -399,8 +399,19 @@ func handleSessionInteraction(id int, mode uint8, command, srcfile, dstdir strin
 
 	// Check if session is already running a shell
 	if session.ShellStarted {
-		if mode != constants.RunShell {
+		if mode != constants.RunShell && mode != constants.Terminate {
 			fmt.Println("Session is busy running a shell. You cannot perform other actions.")
+			return
+		}
+		// If Terminate, send 0x1D + Terminate
+		if mode == constants.Terminate {
+			_, err := session.Conn.Write([]byte{0x1D, constants.Terminate})
+			if err != nil {
+				fmt.Println("Error writing to session:", err)
+			}
+			// Give time for the agent to receive the signal and exit itself
+			time.Sleep(500 * time.Millisecond)
+			removeSession(id)
 			return
 		}
 		// Resume shell
