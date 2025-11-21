@@ -259,3 +259,30 @@ Done.
 [+] New session 2 opened.
 tsh> upload 2 ./exploit.sh /tmp/exploit.sh
 ```
+
+#### Interactive Commands (Inside Shell)
+
+When interacting with a shell session (via `interact <id>`), you can use special commands to transfer files or manage the session without exiting the shell.
+
+*   `tshdget <remote_file> <local_path>`: Download a file from the remote host.
+*   `tshdput <local_path> <remote_path>`: Upload a file to the remote host.
+*   `tshdbg`: Detach from the current session (keep it running in background) and return to the `tsh` manager menu.
+*   `tshdexit`: Force terminate the remote daemon process.
+
+Example:
+
+```
+tsh> interact 1
+[*] Interacting with session 1...
+user@host:~$ ls
+file.txt
+user@host:~$ tshdget file.txt ./local_file.txt
+Downloading 100% |████████████████████| ( 100 B/ 100 B, 1.0 MB/s)
+Done.
+user@host:~$ tshdput ./local_tool /tmp/tool
+Uploading 100% |████████████████████| ( 5.0 kB/ 5.0 kB, 2.0 MB/s)
+Done.
+user@host:~$ tshdbg
+[*] Detached from session.
+tsh>
+```

