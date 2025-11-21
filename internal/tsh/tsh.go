@@ -774,8 +774,6 @@ func handleRunShell(session *Session, command string) bool {
 					// Forward to transfer channel
 					select {
 					case transferChan <- data:
-					default:
-						// Buffer full? Should not happen easily with 1024
 					}
 				} else {
 					os.Stdout.Write(data)
@@ -798,11 +796,6 @@ func handleRunShell(session *Session, command string) bool {
 		buf := make([]byte, 128)
 		var lastBytes []byte
 
-		// For command parsing
-		var captureMode bool
-		var captureBuffer []byte
-		var captureOpcode uint8 // 1: get, 2: put
-
 		for {
 			select {
 			case <-stopChan:
@@ -822,132 +815,6 @@ func handleRunShell(session *Session, command string) bool {
 			for i := 0; i < n; i++ {
 				b := buf[i]
 
-				if captureMode {
-					if b == '\r' || b == '\n' {
-						// Execute Command
-						line := string(captureBuffer)
-						// Clean ANSI from line
-						line = cleanAnsi(line)
-						parts := strings.Fields(line)
-
-						// Send Ctrl+C to clear remote line (assume remote is waiting at prompt with "tshdget")
-						session.Conn.Write([]byte{0x03})
-						time.Sleep(100 * time.Millisecond)
-
-						// Enable Transfer Mode BEFORE sending trigger
-						atomic.StoreInt32(&transferMode, 1)
-
-						// Drain transferChan of any old garbage
-					drainLoop:
-						for {
-							select {
-							case <-transferChan:
-							default:
-								break drainLoop
-							}
-						}
-
-						if captureOpcode == 1 { // get
-							if len(parts) >= 2 {
-								session.Conn.Write([]byte{0x1D, constants.GetFile})
-								terminal.Restore(int(os.Stdin.Fd()), oldState)
-								chanReader := &ChanReader{ch: transferChan} // Use transferChan
-
-								// Try to parse CWD from outputHistory
-								outputHistoryMux.Lock()
-								hist := make([]byte, len(outputHistory))
-								copy(hist, outputHistory)
-								outputHistoryMux.Unlock()
-
-								cwd := parseCwdFromPrompt(hist)
-								logClientDebug("Parsed CWD: '%s'", cwd)
-
-								src := parts[0]
-								if cwd != "" && !filepath.IsAbs(src) {
-									// On Windows, filepath.Join might use backslash, which is fine
-									// But we need to handle if cwd is like "C:\Windows" and src is "file.txt"
-									// We should just append.
-									// Since we are on client (Linux), filepath.Join uses forward slash.
-									// But remote is Windows.
-									// We should just append.
-									if strings.HasSuffix(cwd, "\\") || strings.HasSuffix(cwd, "/") {
-										src = cwd + src
-									} else {
-										src = cwd + "\\" + src
-									}
-								}
-								logClientDebug("Final Source Path: '%s'", src)
-
-								handleGetFile(chanReader, session.Conn, src, parts[1])
-								terminal.MakeRaw(int(os.Stdin.Fd()))
-							} else {
-								fmt.Print("\r\nUsage: tshdget <remote_file> <local_path>\r\n")
-							}
-						} else if captureOpcode == 2 { // put
-							if len(parts) >= 2 {
-								session.Conn.Write([]byte{0x1D, constants.PutFile})
-								terminal.Restore(int(os.Stdin.Fd()), oldState)
-								chanReader := &ChanReader{ch: transferChan} // Use transferChan
-
-								// Try to parse CWD from outputHistory
-								outputHistoryMux.Lock()
-								hist := make([]byte, len(outputHistory))
-								copy(hist, outputHistory)
-								outputHistoryMux.Unlock()
-
-								cwd := parseCwdFromPrompt(hist)
-								logClientDebug("Parsed CWD: '%s'", cwd)
-
-								dst := parts[1]
-								if cwd != "" && !filepath.IsAbs(dst) {
-									if strings.HasSuffix(cwd, "\\") || strings.HasSuffix(cwd, "/") {
-										dst = cwd + dst
-									} else {
-										dst = cwd + "\\" + dst
-									}
-								}
-								logClientDebug("Final Dest Path: '%s'", dst)
-
-								handlePutFile(chanReader, session.Conn, parts[0], dst)
-								terminal.MakeRaw(int(os.Stdin.Fd()))
-							} else {
-								fmt.Print("\r\nUsage: tshdput <local_path> <remote_path>\r\n")
-							}
-						}
-
-						// Disable Transfer Mode
-						atomic.StoreInt32(&transferMode, 0)
-
-						captureMode = false
-						captureBuffer = nil
-						// Send Enter to get a fresh prompt from remote
-						session.Conn.Write([]byte{0x0D})
-					} else if b == 127 || b == 8 { // Backspace
-						if len(captureBuffer) > 0 {
-							captureBuffer = captureBuffer[:len(captureBuffer)-1]
-							// Locally erase char
-							os.Stdout.Write([]byte("\b \b"))
-						} else {
-							// Backspace at start of capture mode -> Exit capture mode
-							captureMode = false
-							captureBuffer = nil
-							// Erase the space that triggered the mode
-							os.Stdout.Write([]byte("\b \b"))
-							// We do not send BS to remote because remote didn't see the space
-						}
-					} else if b == 0x03 { // Ctrl+C
-						captureMode = false
-						captureBuffer = nil
-						os.Stdout.Write([]byte("^C\r\n"))
-						// Send Ctrl+C to remote too?
-						session.Conn.Write([]byte{0x03})
-					} else {
-						captureBuffer = append(captureBuffer, b)
-						os.Stdout.Write([]byte{b})
-					}
-					continue
-				}
-
 				// Normal Mode processing
 				lastBytes = append(lastBytes, b)
 				if len(lastBytes) > 512 {
@@ -966,26 +833,153 @@ func handleRunShell(session *Session, command string) bool {
 				// Check for tshdget
 				if len(lastBytes) >= 8 {
 					suffix := string(lastBytes[len(lastBytes)-8:])
-					if suffix == "tshdget " {
-						captureMode = true
-						captureOpcode = 1
-						captureBuffer = nil
-						// Do not write the space to remote
-						// But we write space locally to show separation?
-						// If we don't write space to remote, remote has "tshdget".
-						// If we write space locally, user sees "tshdget ".
-						os.Stdout.Write([]byte{' '})
+					if suffix == "tshdget\r" || suffix == "tshdget\n" {
+						// Trigger Interactive Mode for Download
+						// 1. Prompt for Source
+						fmt.Print("\r\n[tshdget] Source Path: ")
+						src, err := readRawInput()
+						if err != nil || src == "" {
+							fmt.Print("\r\nCancelled.\r\n")
+							session.Conn.Write([]byte{0x0D}) // Send Enter to restore prompt
+							lastBytes = nil
+							continue
+						}
+
+						// 2. Prompt for Destination
+						fmt.Print("\r\n[tshdget] Local Destination Path: ")
+						dst, err := readRawInput()
+						if err != nil || dst == "" {
+							fmt.Print("\r\nCancelled.\r\n")
+							session.Conn.Write([]byte{0x0D})
+							lastBytes = nil
+							continue
+						}
+
+						// 3. Execute
+						fmt.Printf("\r\nDownloading '%s' to '%s'...\r\n", src, dst)
+
+						// Send Ctrl+C to clear remote line (remote has "tshdget")
+						session.Conn.Write([]byte{0x03})
+						time.Sleep(100 * time.Millisecond)
+
+						// Enable Transfer Mode
+						atomic.StoreInt32(&transferMode, 1)
+
+						// Drain transferChan
+					drainLoopGet:
+						for {
+							select {
+							case <-transferChan:
+							default:
+								break drainLoopGet
+							}
+						}
+
+						session.Conn.Write([]byte{0x1D, constants.GetFile})
+						terminal.Restore(int(os.Stdin.Fd()), oldState)
+						chanReader := &ChanReader{ch: transferChan}
+
+						// Try to parse CWD (optional, best effort)
+						outputHistoryMux.Lock()
+						hist := make([]byte, len(outputHistory))
+						copy(hist, outputHistory)
+						outputHistoryMux.Unlock()
+
+						cwd := parseCwdFromPrompt(hist)
+						logClientDebug("Parsed CWD: '%s'", cwd)
+
+						if cwd != "" && !filepath.IsAbs(src) && !isWindowsAbs(src) {
+							if strings.HasSuffix(cwd, "\\") || strings.HasSuffix(cwd, "/") {
+								src = cwd + src
+							} else {
+								src = cwd + "\\" + src
+							}
+						}
+
+						handleGetFile(chanReader, session.Conn, src, dst)
+						terminal.MakeRaw(int(os.Stdin.Fd()))
+
+						// Disable Transfer Mode
+						atomic.StoreInt32(&transferMode, 0)
+						session.Conn.Write([]byte{0x0D})
+						lastBytes = nil
 						continue
 					}
 				}
+
 				// Check for tshdput
 				if len(lastBytes) >= 8 {
 					suffix := string(lastBytes[len(lastBytes)-8:])
-					if suffix == "tshdput " {
-						captureMode = true
-						captureOpcode = 2
-						captureBuffer = nil
-						os.Stdout.Write([]byte{' '})
+					if suffix == "tshdput\r" || suffix == "tshdput\n" {
+						// Trigger Interactive Mode for Upload
+						// 1. Prompt for Source
+						fmt.Print("\r\n[tshdput] Local Source Path: ")
+						src, err := readRawInput()
+						if err != nil || src == "" {
+							fmt.Print("\r\nCancelled.\r\n")
+							session.Conn.Write([]byte{0x0D})
+							lastBytes = nil
+							continue
+						}
+
+						// 2. Prompt for Destination
+						fmt.Print("\r\n[tshdput] Remote Destination Path: ")
+						dst, err := readRawInput()
+						if err != nil || dst == "" {
+							fmt.Print("\r\nCancelled.\r\n")
+							session.Conn.Write([]byte{0x0D})
+							lastBytes = nil
+							continue
+						}
+
+						// 3. Execute
+						fmt.Printf("\r\nUploading '%s' to '%s'...\r\n", src, dst)
+
+						// Send Ctrl+C
+						session.Conn.Write([]byte{0x03})
+						time.Sleep(100 * time.Millisecond)
+
+						// Enable Transfer Mode
+						atomic.StoreInt32(&transferMode, 1)
+
+						// Drain
+					drainLoopPut:
+						for {
+							select {
+							case <-transferChan:
+							default:
+								break drainLoopPut
+							}
+						}
+
+						session.Conn.Write([]byte{0x1D, constants.PutFile})
+						terminal.Restore(int(os.Stdin.Fd()), oldState)
+						chanReader := &ChanReader{ch: transferChan}
+
+						// Try to parse CWD
+						outputHistoryMux.Lock()
+						hist := make([]byte, len(outputHistory))
+						copy(hist, outputHistory)
+						outputHistoryMux.Unlock()
+
+						cwd := parseCwdFromPrompt(hist)
+						logClientDebug("Parsed CWD: '%s'", cwd)
+
+						if cwd != "" && !filepath.IsAbs(dst) && !isWindowsAbs(dst) {
+							if strings.HasSuffix(cwd, "\\") || strings.HasSuffix(cwd, "/") {
+								dst = cwd + dst
+							} else {
+								dst = cwd + "\\" + dst
+							}
+						}
+
+						handlePutFile(chanReader, session.Conn, src, dst)
+						terminal.MakeRaw(int(os.Stdin.Fd()))
+
+						// Disable Transfer Mode
+						atomic.StoreInt32(&transferMode, 0)
+						session.Conn.Write([]byte{0x0D})
+						lastBytes = nil
 						continue
 					}
 				}
@@ -998,6 +992,54 @@ func handleRunShell(session *Session, command string) bool {
 
 	action := <-actionChan
 	return action == 1
+}
+
+func readRawInput() (string, error) {
+	var input []byte
+	buf := make([]byte, 1)
+	for {
+		n, err := os.Stdin.Read(buf)
+		if err != nil {
+			return "", err
+		}
+		if n == 0 {
+			continue
+		}
+		b := buf[0]
+
+		if b == '\r' || b == '\n' {
+			return string(input), nil
+		} else if b == 0x03 { // Ctrl+C
+			return "", fmt.Errorf("interrupted")
+		} else if b == 127 || b == 8 { // Backspace
+			if len(input) > 0 {
+				input = input[:len(input)-1]
+				os.Stdout.Write([]byte("\b \b"))
+			}
+		} else {
+			input = append(input, b)
+			os.Stdout.Write([]byte{b})
+		}
+	}
+}
+
+func isWindowsAbs(path string) bool {
+	// Check for drive letter: X:\ or X:/
+	if len(path) >= 3 {
+		if path[1] == ':' && (path[2] == '\\' || path[2] == '/') {
+			c := path[0]
+			if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+				return true
+			}
+		}
+	}
+	// Check for UNC path: \\ or //
+	if len(path) >= 2 {
+		if (path[0] == '\\' && path[1] == '\\') || (path[0] == '/' && path[1] == '/') {
+			return true
+		}
+	}
+	return false
 }
 
 func cleanAnsi(str string) string {

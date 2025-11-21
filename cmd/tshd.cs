@@ -488,6 +488,7 @@ namespace Tshd
         {
             this.client = client;
             this.ns = client.GetStream();
+            this.ns.WriteTimeout = 30000; // 30 second timeout
             this.secret = secret;
         }
 
@@ -678,8 +679,11 @@ namespace Tshd
 
                  byte[] digest = sendHmac.ComputeHash(hmacInput);
 
+                 // Write encrypted data and digest
+                 // Note: NetworkStream.Write() in C# writes all bytes synchronously or throws
                  ns.Write(encrypted, 0, fullLen);
                  ns.Write(digest, 0, 20);
+                 ns.Flush();
                  sendCtr++;
              }
         }
